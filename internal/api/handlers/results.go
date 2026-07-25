@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	clinicalresult "github.com/shraddharanjan/clinical-results-escalation-engine/internal/result"
+	clinicaltask "github.com/shraddharanjan/clinical-results-escalation-engine/internal/task"
 )
 
 type ResultHandler struct {
@@ -22,6 +23,7 @@ func NewResultHandler(
 
 type createResultResponse struct {
 	Result         clinicalresult.Result         `json:"result"`
+	Task           clinicaltask.Task             `json:"task"`
 	Classification clinicalresult.Classification `json:"classification"`
 }
 
@@ -41,7 +43,7 @@ func (h *ResultHandler) Create(
 		return
 	}
 
-	createdResult, classification, err := h.service.Create(
+	workflow, classification, err := h.service.Create(
 		r.Context(),
 		input,
 	)
@@ -67,7 +69,8 @@ func (h *ResultHandler) Create(
 	}
 
 	writeJSON(w, http.StatusCreated, createResultResponse{
-		Result:         createdResult,
+		Result:         workflow.Result,
+		Task:           workflow.Task,
 		Classification: classification,
 	})
 }

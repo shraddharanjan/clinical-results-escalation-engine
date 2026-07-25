@@ -15,7 +15,11 @@ var (
 )
 
 type Repository interface {
-	Create(ctx context.Context, result Result) (Result, error)
+	CreateWorkflow(
+		ctx context.Context,
+		result Result,
+		classification Classification,
+	) (WorkflowCreation, error)
 }
 
 type Service struct {
@@ -31,16 +35,16 @@ func NewService(repository Repository) *Service {
 func (s *Service) Create(
 	ctx context.Context,
 	input CreateResultInput,
-) (Result, Classification, error) {
+) (WorkflowCreation, Classification, error) {
 	if err := validateInput(input); err != nil {
-		return Result{}, Classification{}, err
+		return WorkflowCreation{}, Classification{}, err
 	}
 
 	classification := classify(input)
 
 	rawPayload, err := json.Marshal(input)
 	if err != nil {
-		return Result{}, Classification{}, fmt.Errorf(
+		return WorkflowCreation{}, Classification{}, fmt.Errorf(
 			"marshal result payload: %w",
 			err,
 		)
@@ -61,12 +65,16 @@ func (s *Service) Create(
 		RawPayload:       rawPayload,
 	}
 
-	createdResult, err := s.repository.Create(ctx, newResult)
+	workflow, err := s.repository.CreateWorkflow(
+		ctx,
+		newResult,
+		classification,
+	)
 	if err != nil {
-		return Result{}, Classification{}, err
+		return WorkflowCreation{}, Classification{}, err
 	}
 
-	return createdResult, classification, nil
+	return workflow, classification, nil
 }
 
 func validateInput(input CreateResultInput) error {
