@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -14,8 +15,12 @@ import (
 )
 
 var (
-	ErrNoClaimableTask = errors.New("no claimable task available")
-	ErrLeaseLost       = errors.New("task lease was lost")
+	ErrNoClaimableTask   = errors.New("no claimable task available")
+	ErrLeaseLost         = errors.New("task lease was lost")
+	ErrTaskNotFound      = errors.New("clinical task was not found")
+	ErrTaskStateConflict = errors.New(
+		"clinical task state or version has changed",
+	)
 )
 
 type Claim struct {
@@ -560,4 +565,199 @@ func (r *PostgresRepository) MarkFailed(
 	}
 
 	return nil
+}
+
+func (r *PostgresRepository) Acknowledge(
+	ctx context.Context,
+	taskID uuid.UUID,
+	clinicianID string,
+	expectedVersion int64,
+) (Task, error) {
+	if clinicianID == "" {
+		return Task{}, fmt.Errorf("clinician ID is required")
+	}
+
+	if expectedVersion <= 0 {
+		return Task{}, fmt.Errorf(
+			"expected version must be greater than zero",
+		)
+	}
+
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return Task{}, fmt.Errorf(
+			"begin acknowledgement transaction: %w",
+			err,
+		)
+	}
+
+	defer func() {
+		_ = tx.Rollback(context.Background())
+	}()
+
+	const updateQuery = `
+		UPDATE clinical_tasks
+		SET
+			status = 'acknowledged',
+			assigned_user = $2,
+			acknowledgement_due_at = NULL,
+			lease_owner = NULL,
+			lease_expires_at = NULL,
+			last_error = NULL,
+			version = version + 1,
+			updated_at = now()
+		WHERE
+			id = $1
+			AND status = 'awaiting_ack'
+			AND version = $3
+		RETURNING
+			id,
+			result_id,
+			task_type,
+			status,
+			severity::text,
+			assigned_team,
+			assigned_user,
+			escalation_level,
+			available_at,
+			acknowledgement_due_at,
+			lease_owner,
+			lease_expires_at,
+			attempt_count,
+			version,
+			created_at,
+			updated_at
+	`
+
+	var acknowledgedTask Task
+
+	err = tx.QueryRow(
+		ctx,
+		updateQuery,
+		taskID,
+		clinicianID,
+		expectedVersion,
+	).Scan(
+		&acknowledgedTask.ID,
+		&acknowledgedTask.ResultID,
+		&acknowledgedTask.TaskType,
+		&acknowledgedTask.Status,
+		&acknowledgedTask.Severity,
+		&acknowledgedTask.AssignedTeam,
+		&acknowledgedTask.AssignedUser,
+		&acknowledgedTask.EscalationLevel,
+		&acknowledgedTask.AvailableAt,
+		&acknowledgedTask.AcknowledgementDueAt,
+		&acknowledgedTask.LeaseOwner,
+		&acknowledgedTask.LeaseExpiresAt,
+		&acknowledgedTask.AttemptCount,
+		&acknowledgedTask.Version,
+		&acknowledgedTask.CreatedAt,
+		&acknowledgedTask.UpdatedAt,
+	)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		exists, lookupErr := taskExists(
+			ctx,
+			tx,
+			taskID,
+		)
+		if lookupErr != nil {
+			return Task{}, lookupErr
+		}
+
+		if !exists {
+			return Task{}, ErrTaskNotFound
+		}
+
+		return Task{}, ErrTaskStateConflict
+	}
+
+	if err != nil {
+		return Task{}, fmt.Errorf(
+			"acknowledge clinical task: %w",
+			err,
+		)
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"clinician_id":     clinicianID,
+		"previous_status":  StatusAwaitingAck,
+		"new_status":       acknowledgedTask.Status,
+		"escalation_level": acknowledgedTask.EscalationLevel,
+		"version":          acknowledgedTask.Version,
+	})
+	if err != nil {
+		return Task{}, fmt.Errorf(
+			"marshal task acknowledgement payload: %w",
+			err,
+		)
+	}
+
+	const auditQuery = `
+		INSERT INTO audit_events (
+			aggregate_type,
+			aggregate_id,
+			event_type,
+			actor_type,
+			actor_id,
+			payload
+		)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`
+
+	_, err = tx.Exec(
+		ctx,
+		auditQuery,
+		audit.AggregateClinicalTask,
+		acknowledgedTask.ID,
+		audit.EventTaskAcknowledged,
+		"clinician",
+		clinicianID,
+		payload,
+	)
+	if err != nil {
+		return Task{}, fmt.Errorf(
+			"insert task acknowledged audit event: %w",
+			err,
+		)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Task{}, fmt.Errorf(
+			"commit acknowledgement transaction: %w",
+			err,
+		)
+	}
+
+	return acknowledgedTask, nil
+}
+
+func taskExists(
+	ctx context.Context,
+	tx pgx.Tx,
+	taskID uuid.UUID,
+) (bool, error) {
+	const query = `
+		SELECT EXISTS (
+			SELECT 1
+			FROM clinical_tasks
+			WHERE id = $1
+		)
+	`
+
+	var exists bool
+
+	if err := tx.QueryRow(
+		ctx,
+		query,
+		taskID,
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf(
+			"check whether clinical task exists: %w",
+			err,
+		)
+	}
+
+	return exists, nil
 }

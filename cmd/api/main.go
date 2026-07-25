@@ -17,6 +17,7 @@ import (
 	"github.com/shraddharanjan/clinical-results-escalation-engine/internal/api/handlers"
 	"github.com/shraddharanjan/clinical-results-escalation-engine/internal/platform/database"
 	clinicalresult "github.com/shraddharanjan/clinical-results-escalation-engine/internal/result"
+	clinicaltask "github.com/shraddharanjan/clinical-results-escalation-engine/internal/task"
 )
 
 func main() {
@@ -46,16 +47,23 @@ func run() error {
 	defer databasePool.Close()
 
 	resultRepository := clinicalresult.NewPostgresRepository(databasePool)
+	taskRepository := clinicaltask.NewPostgresRepository(
+		databasePool,
+	)
 	resultService := clinicalresult.NewService(resultRepository)
 
 	healthHandler := handlers.NewHealthHandler()
 	resultHandler := handlers.NewResultHandler(resultService)
+	acknowledgementHandler :=
+		handlers.NewAcknowledgementHandler(
+			taskRepository,
+		)
 
 	router := api.NewRouter(
 		healthHandler,
 		resultHandler,
+		acknowledgementHandler,
 	)
-
 	server := &http.Server{
 		Addr:              ":" + httpPort,
 		Handler:           router,

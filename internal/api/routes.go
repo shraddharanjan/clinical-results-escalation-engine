@@ -12,6 +12,7 @@ import (
 func NewRouter(
 	healthHandler *handlers.HealthHandler,
 	resultHandler *handlers.ResultHandler,
+	acknowledgementHandler *handlers.AcknowledgementHandler,
 ) http.Handler {
 	router := chi.NewRouter()
 
@@ -23,7 +24,11 @@ func NewRouter(
 
 	router.Route("/v1", func(router chi.Router) {
 		router.Post("/results", resultHandler.Create)
-	})
 
+		router.Post(
+			"/tasks/{taskID}/acknowledgements",
+			acknowledgementHandler.Create,
+		)
+	})
 	return router
 }

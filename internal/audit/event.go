@@ -24,6 +24,10 @@ const (
 	EventNotificationPermanentFailed = "notification_permanent_failed"
 	EventTaskAwaitingAcknowledgement = "task_awaiting_acknowledgement"
 	EventTaskFailed                  = "task_failed"
+
+	EventTaskAcknowledged              = "task_acknowledged"
+	EventAcknowledgementDeadlineMissed = "acknowledgement_deadline_missed"
+	EventTaskEscalated                 = "task_escalated"
 )
 
 type Event struct {
