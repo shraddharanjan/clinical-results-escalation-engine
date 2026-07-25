@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: clinical-results-postgres
+    environment:
+      POSTGRES_DB: clinical_results
+      POSTGRES_USER: clinical_user
+      POSTGRES_PASSWORD: clinical_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - clinical_results_postgres_data:/var/lib/postgresql/data
+      - ../migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U clinical_user -d clinical_results
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  clinical_results_postgres_data:
