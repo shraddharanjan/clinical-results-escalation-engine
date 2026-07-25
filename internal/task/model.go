@@ -31,8 +31,12 @@ type Task struct {
 	EscalationLevel      int        `json:"escalation_level"`
 	AvailableAt          time.Time  `json:"available_at"`
 	AcknowledgementDueAt *time.Time `json:"acknowledgement_due_at,omitempty"`
-	AttemptCount         int        `json:"attempt_count"`
-	Version              int64      `json:"version"`
-	CreatedAt            time.Time  `json:"created_at"`
-	UpdatedAt            time.Time  `json:"updated_at"`
+
+	LeaseOwner     *string    `json:"lease_owner,omitempty"`
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
+
+	AttemptCount int       `json:"attempt_count"`
+	Version      int64     `json:"version"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }

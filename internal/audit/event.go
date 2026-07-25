@@ -14,6 +14,7 @@ const (
 	EventResultReceived   = "result_received"
 	EventResultClassified = "result_classified"
 	EventTaskCreated      = "task_created"
+	EventTaskClaimed      = "task_claimed"
 )
 
 type Event struct {
