@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -9,51 +10,122 @@ import (
 	"github.com/google/uuid"
 )
 
-type fakeTaskClaimer struct {
-	mu         sync.Mutex
-	task       Task
-	claimCount int
+type fakeTaskStore struct {
+	mu sync.Mutex
+
+	claim              Claim
+	claimReturned      bool
+	renewalCount       int
+	releaseCount       int
+	releasedError      error
+	loseLeaseOnRenewal bool
 }
 
-func (f *fakeTaskClaimer) ClaimOne(
+func (f *fakeTaskStore) ClaimOne(
 	_ context.Context,
 	workerID string,
 	_ time.Duration,
-) (Task, error) {
+) (Claim, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if f.claimCount > 0 {
-		return Task{}, ErrNoClaimableTask
+	if f.claimReturned {
+		return Claim{}, ErrNoClaimableTask
 	}
 
-	f.claimCount++
+	f.claimReturned = true
 
 	leaseOwner := workerID
+	leaseExpiry := time.Now().Add(50 * time.Millisecond)
 
-	f.task = Task{
-		ID:           uuid.New(),
-		Status:       StatusProcessing,
-		Severity:     "critical",
-		AssignedTeam: "acute-medicine",
-		LeaseOwner:   &leaseOwner,
-		AttemptCount: 1,
-		Version:      2,
+	f.claim = Claim{
+		Task: Task{
+			ID:             uuid.New(),
+			Status:         StatusProcessing,
+			Severity:       "critical",
+			AssignedTeam:   "acute-medicine",
+			LeaseOwner:     &leaseOwner,
+			LeaseExpiresAt: &leaseExpiry,
+			AttemptCount:   1,
+			Version:        2,
+		},
+		PreviousStatus: StatusPending,
 	}
 
-	return f.task, nil
+	return f.claim, nil
 }
 
-func TestWorkerClaimsTask(t *testing.T) {
+func (f *fakeTaskStore) RenewLease(
+	_ context.Context,
+	_ string,
+	_ string,
+	_ time.Duration,
+) (time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.renewalCount++
+
+	if f.loseLeaseOnRenewal {
+		return time.Time{}, ErrLeaseLost
+	}
+
+	return time.Now().Add(50 * time.Millisecond), nil
+}
+
+func (f *fakeTaskStore) ReleaseForRetry(
+	_ context.Context,
+	_ Task,
+	_ string,
+	_ time.Duration,
+	processingError error,
+) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.releaseCount++
+	f.releasedError = processingError
+
+	return nil
+}
+
+type slowFailingProcessor struct {
+	duration time.Duration
+}
+
+func (p slowFailingProcessor) Process(
+	ctx context.Context,
+	_ Task,
+) error {
+	timer := time.NewTimer(p.duration)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+
+	case <-timer.C:
+		return errors.New("simulated processing failure")
+	}
+}
+
+func TestWorkerRenewsLeaseAndReleasesFailedTask(
+	t *testing.T,
+) {
 	t.Parallel()
 
-	repository := &fakeTaskClaimer{}
+	store := &fakeTaskStore{}
 
 	worker, err := NewWorker(
-		repository,
+		store,
+		slowFailingProcessor{
+			duration: 35 * time.Millisecond,
+		},
 		"test-worker",
+		5*time.Millisecond,
+		30*time.Millisecond,
 		10*time.Millisecond,
-		30*time.Second,
+		20*time.Millisecond,
 	)
 	if err != nil {
 		t.Fatalf("create worker: %v", err)
@@ -61,7 +133,7 @@ func TestWorkerClaimsTask(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
-		40*time.Millisecond,
+		70*time.Millisecond,
 	)
 	defer cancel()
 
@@ -69,24 +141,21 @@ func TestWorkerClaimsTask(t *testing.T) {
 		t.Fatalf("run worker: %v", err)
 	}
 
-	repository.mu.Lock()
-	defer repository.mu.Unlock()
+	store.mu.Lock()
+	defer store.mu.Unlock()
 
-	if repository.claimCount != 1 {
+	if store.renewalCount == 0 {
+		t.Fatal("expected at least one lease renewal")
+	}
+
+	if store.releaseCount != 1 {
 		t.Fatalf(
-			"expected one successful claim, got %d",
-			repository.claimCount,
+			"expected one release, got %d",
+			store.releaseCount,
 		)
 	}
 
-	if repository.task.LeaseOwner == nil {
-		t.Fatal("expected task to have a lease owner")
-	}
-
-	if *repository.task.LeaseOwner != "test-worker" {
-		t.Fatalf(
-			"expected lease owner test-worker, got %s",
-			*repository.task.LeaseOwner,
-		)
+	if store.releasedError == nil {
+		t.Fatal("expected processing error to be recorded")
 	}
 }

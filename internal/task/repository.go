@@ -13,7 +13,18 @@ import (
 	"github.com/shraddharanjan/clinical-results-escalation-engine/internal/audit"
 )
 
-var ErrNoClaimableTask = errors.New("no claimable task available")
+var (
+	ErrNoClaimableTask = errors.New("no claimable task available")
+	ErrLeaseLost       = errors.New("task lease was lost")
+)
+
+type Claim struct {
+	Task                   Task
+	Recovered              bool
+	PreviousStatus         Status
+	PreviousLeaseOwner     *string
+	PreviousLeaseExpiresAt *time.Time
+}
 
 type PostgresRepository struct {
 	pool *pgxpool.Pool
@@ -29,10 +40,20 @@ func (r *PostgresRepository) ClaimOne(
 	ctx context.Context,
 	workerID string,
 	leaseDuration time.Duration,
-) (Task, error) {
+) (Claim, error) {
+	if workerID == "" {
+		return Claim{}, fmt.Errorf("worker ID is required")
+	}
+
+	if leaseDuration <= 0 {
+		return Claim{}, fmt.Errorf(
+			"lease duration must be greater than zero",
+		)
+	}
+
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return Task{}, fmt.Errorf(
+		return Claim{}, fmt.Errorf(
 			"begin task claim transaction: %w",
 			err,
 		)
@@ -42,33 +63,33 @@ func (r *PostgresRepository) ClaimOne(
 		_ = tx.Rollback(context.Background())
 	}()
 
-	claimedTask, err := claimTask(
+	claim, err := claimTask(
 		ctx,
 		tx,
 		workerID,
 		leaseDuration,
 	)
 	if err != nil {
-		return Task{}, err
+		return Claim{}, err
 	}
 
-	if err := insertTaskClaimedEvent(
+	if err := insertClaimAuditEvent(
 		ctx,
 		tx,
-		claimedTask,
+		claim,
 		workerID,
 	); err != nil {
-		return Task{}, err
+		return Claim{}, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return Task{}, fmt.Errorf(
+		return Claim{}, fmt.Errorf(
 			"commit task claim transaction: %w",
 			err,
 		)
 	}
 
-	return claimedTask, nil
+	return claim, nil
 }
 
 func claimTask(
@@ -76,17 +97,31 @@ func claimTask(
 	tx pgx.Tx,
 	workerID string,
 	leaseDuration time.Duration,
-) (Task, error) {
+) (Claim, error) {
 	const query = `
 		WITH claimable_task AS (
-			SELECT id
+			SELECT
+				id,
+				status::text AS previous_status,
+				lease_owner AS previous_lease_owner,
+				lease_expires_at AS previous_lease_expires_at
 			FROM clinical_tasks
 			WHERE
-				status IN ('pending', 'escalated')
-				AND available_at <= now()
-				AND (
-					lease_expires_at IS NULL
-					OR lease_expires_at <= now()
+				(
+					status IN ('pending', 'escalated')
+					AND available_at <= now()
+					AND (
+						lease_expires_at IS NULL
+						OR lease_expires_at <= now()
+					)
+				)
+				OR
+				(
+					status = 'processing'
+					AND (
+						lease_expires_at IS NULL
+						OR lease_expires_at <= now()
+					)
 				)
 			ORDER BY
 				CASE severity
@@ -103,7 +138,8 @@ func claimTask(
 		SET
 			status = 'processing',
 			lease_owner = $1,
-			lease_expires_at = now() + ($2 * interval '1 millisecond'),
+			lease_expires_at =
+				now() + ($2 * interval '1 millisecond'),
 			attempt_count = task.attempt_count + 1,
 			version = task.version + 1,
 			updated_at = now()
@@ -125,75 +161,81 @@ func claimTask(
 			task.attempt_count,
 			task.version,
 			task.created_at,
-			task.updated_at
+			task.updated_at,
+			claimable_task.previous_status,
+			claimable_task.previous_lease_owner,
+			claimable_task.previous_lease_expires_at
 	`
 
-	leaseMilliseconds := leaseDuration.Milliseconds()
-
-	if leaseMilliseconds <= 0 {
-		return Task{}, fmt.Errorf(
-			"lease duration must be greater than zero",
-		)
-	}
-
-	var claimedTask Task
+	var claim Claim
 
 	err := tx.QueryRow(
 		ctx,
 		query,
 		workerID,
-		leaseMilliseconds,
+		leaseDuration.Milliseconds(),
 	).Scan(
-		&claimedTask.ID,
-		&claimedTask.ResultID,
-		&claimedTask.TaskType,
-		&claimedTask.Status,
-		&claimedTask.Severity,
-		&claimedTask.AssignedTeam,
-		&claimedTask.AssignedUser,
-		&claimedTask.EscalationLevel,
-		&claimedTask.AvailableAt,
-		&claimedTask.AcknowledgementDueAt,
-		&claimedTask.LeaseOwner,
-		&claimedTask.LeaseExpiresAt,
-		&claimedTask.AttemptCount,
-		&claimedTask.Version,
-		&claimedTask.CreatedAt,
-		&claimedTask.UpdatedAt,
+		&claim.Task.ID,
+		&claim.Task.ResultID,
+		&claim.Task.TaskType,
+		&claim.Task.Status,
+		&claim.Task.Severity,
+		&claim.Task.AssignedTeam,
+		&claim.Task.AssignedUser,
+		&claim.Task.EscalationLevel,
+		&claim.Task.AvailableAt,
+		&claim.Task.AcknowledgementDueAt,
+		&claim.Task.LeaseOwner,
+		&claim.Task.LeaseExpiresAt,
+		&claim.Task.AttemptCount,
+		&claim.Task.Version,
+		&claim.Task.CreatedAt,
+		&claim.Task.UpdatedAt,
+		&claim.PreviousStatus,
+		&claim.PreviousLeaseOwner,
+		&claim.PreviousLeaseExpiresAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return Task{}, ErrNoClaimableTask
+		return Claim{}, ErrNoClaimableTask
 	}
 
 	if err != nil {
-		return Task{}, fmt.Errorf(
+		return Claim{}, fmt.Errorf(
 			"claim clinical task: %w",
 			err,
 		)
 	}
 
-	return claimedTask, nil
+	claim.Recovered = claim.PreviousStatus == StatusProcessing
+
+	return claim, nil
 }
 
-func insertTaskClaimedEvent(
+func insertClaimAuditEvent(
 	ctx context.Context,
 	tx pgx.Tx,
-	task Task,
+	claim Claim,
 	workerID string,
 ) error {
+	eventType := audit.EventTaskClaimed
+
+	if claim.Recovered {
+		eventType = audit.EventTaskRecoveredAfterLeaseExpiry
+	}
+
 	payload, err := json.Marshal(map[string]any{
-		"worker_id":        workerID,
-		"previous_status":  StatusPending,
-		"new_status":       task.Status,
-		"severity":         task.Severity,
-		"assigned_team":    task.AssignedTeam,
-		"attempt_count":    task.AttemptCount,
-		"lease_expires_at": task.LeaseExpiresAt,
-		"version":          task.Version,
+		"worker_id":                 workerID,
+		"previous_status":           claim.PreviousStatus,
+		"new_status":                claim.Task.Status,
+		"previous_lease_owner":      claim.PreviousLeaseOwner,
+		"previous_lease_expires_at": claim.PreviousLeaseExpiresAt,
+		"lease_expires_at":          claim.Task.LeaseExpiresAt,
+		"attempt_count":             claim.Task.AttemptCount,
+		"version":                   claim.Task.Version,
 	})
 	if err != nil {
 		return fmt.Errorf(
-			"marshal task claimed audit payload: %w",
+			"marshal task claim audit payload: %w",
 			err,
 		)
 	}
@@ -207,29 +249,199 @@ func insertTaskClaimedEvent(
 			actor_id,
 			payload
 		)
-		VALUES (
-			$1,
-			$2,
-			$3,
-			$4,
-			$5,
-			$6
-		)
+		VALUES ($1, $2, $3, $4, $5, $6)
 	`
 
 	_, err = tx.Exec(
 		ctx,
 		query,
 		audit.AggregateClinicalTask,
-		task.ID,
-		audit.EventTaskClaimed,
+		claim.Task.ID,
+		eventType,
 		"worker",
 		workerID,
 		payload,
 	)
 	if err != nil {
 		return fmt.Errorf(
-			"insert task claimed audit event: %w",
+			"insert %s audit event: %w",
+			eventType,
+			err,
+		)
+	}
+
+	return nil
+}
+
+func (r *PostgresRepository) RenewLease(
+	ctx context.Context,
+	taskID string,
+	workerID string,
+	leaseDuration time.Duration,
+) (time.Time, error) {
+	if leaseDuration <= 0 {
+		return time.Time{}, fmt.Errorf(
+			"lease duration must be greater than zero",
+		)
+	}
+
+	const query = `
+		UPDATE clinical_tasks
+		SET
+			lease_expires_at =
+				now() + ($3 * interval '1 millisecond'),
+			updated_at = now()
+		WHERE
+			id = $1
+			AND status = 'processing'
+			AND lease_owner = $2
+			AND lease_expires_at > now()
+		RETURNING lease_expires_at
+	`
+
+	var leaseExpiresAt time.Time
+
+	err := r.pool.QueryRow(
+		ctx,
+		query,
+		taskID,
+		workerID,
+		leaseDuration.Milliseconds(),
+	).Scan(&leaseExpiresAt)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, ErrLeaseLost
+	}
+
+	if err != nil {
+		return time.Time{}, fmt.Errorf(
+			"renew task lease: %w",
+			err,
+		)
+	}
+
+	return leaseExpiresAt, nil
+}
+
+func (r *PostgresRepository) ReleaseForRetry(
+	ctx context.Context,
+	task Task,
+	workerID string,
+	retryDelay time.Duration,
+	processingError error,
+) error {
+	if retryDelay < 0 {
+		return fmt.Errorf("retry delay cannot be negative")
+	}
+
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf(
+			"begin release-for-retry transaction: %w",
+			err,
+		)
+	}
+
+	defer func() {
+		_ = tx.Rollback(context.Background())
+	}()
+
+	const updateQuery = `
+		UPDATE clinical_tasks
+		SET
+			status = 'pending',
+			available_at =
+				now() + ($3 * interval '1 millisecond'),
+			lease_owner = NULL,
+			lease_expires_at = NULL,
+			last_error = $4,
+			version = version + 1,
+			updated_at = now()
+		WHERE
+			id = $1
+			AND status = 'processing'
+			AND lease_owner = $2
+			AND lease_expires_at > now()
+		RETURNING version, available_at
+	`
+
+	errorMessage := "unknown processing error"
+	if processingError != nil {
+		errorMessage = processingError.Error()
+	}
+
+	var (
+		newVersion  int64
+		availableAt time.Time
+	)
+
+	err = tx.QueryRow(
+		ctx,
+		updateQuery,
+		task.ID,
+		workerID,
+		retryDelay.Milliseconds(),
+		errorMessage,
+	).Scan(
+		&newVersion,
+		&availableAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrLeaseLost
+	}
+
+	if err != nil {
+		return fmt.Errorf(
+			"release task for retry: %w",
+			err,
+		)
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"worker_id":    workerID,
+		"reason":       errorMessage,
+		"available_at": availableAt,
+		"version":      newVersion,
+	})
+	if err != nil {
+		return fmt.Errorf(
+			"marshal release-for-retry payload: %w",
+			err,
+		)
+	}
+
+	const auditQuery = `
+		INSERT INTO audit_events (
+			aggregate_type,
+			aggregate_id,
+			event_type,
+			actor_type,
+			actor_id,
+			payload
+		)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`
+
+	_, err = tx.Exec(
+		ctx,
+		auditQuery,
+		audit.AggregateClinicalTask,
+		task.ID,
+		audit.EventTaskReleasedForRetry,
+		"worker",
+		workerID,
+		payload,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"insert release-for-retry audit event: %w",
+			err,
+		)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf(
+			"commit release-for-retry transaction: %w",
 			err,
 		)
 	}

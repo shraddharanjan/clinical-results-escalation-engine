@@ -11,10 +11,12 @@ const (
 	AggregateClinicalResult = "clinical_result"
 	AggregateClinicalTask   = "clinical_task"
 
-	EventResultReceived   = "result_received"
-	EventResultClassified = "result_classified"
-	EventTaskCreated      = "task_created"
-	EventTaskClaimed      = "task_claimed"
+	EventResultReceived                = "result_received"
+	EventResultClassified              = "result_classified"
+	EventTaskCreated                   = "task_created"
+	EventTaskClaimed                   = "task_claimed"
+	EventTaskRecoveredAfterLeaseExpiry = "task_recovered_after_lease_expiry"
+	EventTaskReleasedForRetry          = "task_released_for_retry"
 )
 
 type Event struct {

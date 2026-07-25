@@ -52,6 +52,30 @@ func run() error {
 		return err
 	}
 
+	renewalInterval, err := durationFromEnvironment(
+		"WORKER_RENEWAL_INTERVAL",
+		10*time.Second,
+	)
+	if err != nil {
+		return err
+	}
+
+	processingDuration, err := durationFromEnvironment(
+		"WORKER_PROCESSING_DURATION",
+		20*time.Second,
+	)
+	if err != nil {
+		return err
+	}
+
+	retryDelay, err := durationFromEnvironment(
+		"WORKER_RETRY_DELAY",
+		30*time.Second,
+	)
+	if err != nil {
+		return err
+	}
+
 	ctx, stop := signal.NotifyContext(
 		context.Background(),
 		syscall.SIGINT,
@@ -69,16 +93,25 @@ func run() error {
 		databasePool,
 	)
 
+	processor, err := clinicaltask.NewPlaceholderProcessor(
+		processingDuration,
+	)
+	if err != nil {
+		return fmt.Errorf("create task processor: %w", err)
+	}
+
 	worker, err := clinicaltask.NewWorker(
 		taskRepository,
+		processor,
 		workerID,
 		pollInterval,
 		leaseDuration,
+		renewalInterval,
+		retryDelay,
 	)
 	if err != nil {
 		return fmt.Errorf("create worker: %w", err)
 	}
-
 	if err := worker.Run(ctx); err != nil {
 		return fmt.Errorf("run worker: %w", err)
 	}

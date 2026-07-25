@@ -8,113 +8,321 @@ import (
 	"time"
 )
 
-type TaskClaimer interface {
+type TaskStore interface {
 	ClaimOne(
 		ctx context.Context,
 		workerID string,
 		leaseDuration time.Duration,
-	) (Task, error)
+	) (Claim, error)
+
+	RenewLease(
+		ctx context.Context,
+		taskID string,
+		workerID string,
+		leaseDuration time.Duration,
+	) (time.Time, error)
+
+	ReleaseForRetry(
+		ctx context.Context,
+		task Task,
+		workerID string,
+		retryDelay time.Duration,
+		processingError error,
+	) error
 }
 
 type Worker struct {
-	repository    TaskClaimer
-	workerID      string
-	pollInterval  time.Duration
-	leaseDuration time.Duration
+	repository      TaskStore
+	processor       Processor
+	workerID        string
+	pollInterval    time.Duration
+	leaseDuration   time.Duration
+	renewalInterval time.Duration
+	retryDelay      time.Duration
 }
 
 func NewWorker(
-	repository TaskClaimer,
+	repository TaskStore,
+	processor Processor,
 	workerID string,
 	pollInterval time.Duration,
 	leaseDuration time.Duration,
+	renewalInterval time.Duration,
+	retryDelay time.Duration,
 ) (*Worker, error) {
-	if repository == nil {
+	switch {
+	case repository == nil:
 		return nil, fmt.Errorf("task repository is required")
-	}
 
-	if workerID == "" {
+	case processor == nil:
+		return nil, fmt.Errorf("task processor is required")
+
+	case workerID == "":
 		return nil, fmt.Errorf("worker ID is required")
-	}
 
-	if pollInterval <= 0 {
+	case pollInterval <= 0:
 		return nil, fmt.Errorf(
 			"poll interval must be greater than zero",
 		)
-	}
 
-	if leaseDuration <= 0 {
+	case leaseDuration <= 0:
 		return nil, fmt.Errorf(
 			"lease duration must be greater than zero",
+		)
+
+	case renewalInterval <= 0:
+		return nil, fmt.Errorf(
+			"renewal interval must be greater than zero",
+		)
+
+	case renewalInterval >= leaseDuration:
+		return nil, fmt.Errorf(
+			"renewal interval must be shorter than lease duration",
+		)
+
+	case retryDelay < 0:
+		return nil, fmt.Errorf(
+			"retry delay cannot be negative",
 		)
 	}
 
 	return &Worker{
-		repository:    repository,
-		workerID:      workerID,
-		pollInterval:  pollInterval,
-		leaseDuration: leaseDuration,
+		repository:      repository,
+		processor:       processor,
+		workerID:        workerID,
+		pollInterval:    pollInterval,
+		leaseDuration:   leaseDuration,
+		renewalInterval: renewalInterval,
+		retryDelay:      retryDelay,
 	}, nil
 }
 
 func (w *Worker) Run(ctx context.Context) error {
 	log.Printf(
-		"worker %s started with poll interval %s and lease duration %s",
+		"worker %s started: poll=%s lease=%s renewal=%s retry=%s",
 		w.workerID,
 		w.pollInterval,
 		w.leaseDuration,
+		w.renewalInterval,
+		w.retryDelay,
 	)
 
-	ticker := time.NewTicker(w.pollInterval)
-	defer ticker.Stop()
-
-	// Try immediately rather than waiting for the first ticker event.
-	w.claimOnce(ctx)
-
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			log.Printf("worker %s stopping", w.workerID)
 			return nil
-
-		case <-ticker.C:
-			w.claimOnce(ctx)
 		}
+
+		claim, err := w.claimOne(ctx)
+		if errors.Is(err, ErrNoClaimableTask) {
+			if err := waitForContext(ctx, w.pollInterval); err != nil {
+				log.Printf("worker %s stopping", w.workerID)
+				return nil
+			}
+
+			continue
+		}
+
+		if err != nil {
+			log.Printf(
+				"worker %s failed to claim task: %v",
+				w.workerID,
+				err,
+			)
+
+			if err := waitForContext(ctx, w.pollInterval); err != nil {
+				return nil
+			}
+
+			continue
+		}
+		if claim.Recovered {
+			previousOwner := "unknown"
+
+			if claim.PreviousLeaseOwner != nil {
+				previousOwner = *claim.PreviousLeaseOwner
+			}
+
+			log.Printf(
+				"worker %s recovered task %s previously owned by %s",
+				w.workerID,
+				claim.Task.ID,
+				previousOwner,
+			)
+		}
+
+		w.processClaim(ctx, claim.Task)
 	}
 }
 
-func (w *Worker) claimOnce(ctx context.Context) {
+func (w *Worker) claimOne(ctx context.Context) (Claim, error) {
 	claimContext, cancel := context.WithTimeout(
 		ctx,
 		5*time.Second,
 	)
 	defer cancel()
 
-	claimedTask, err := w.repository.ClaimOne(
+	return w.repository.ClaimOne(
 		claimContext,
 		w.workerID,
 		w.leaseDuration,
 	)
-	if errors.Is(err, ErrNoClaimableTask) {
-		return
-	}
+}
 
-	if err != nil {
-		log.Printf(
-			"worker %s failed to claim task: %v",
-			w.workerID,
-			err,
+func (w *Worker) processClaim(
+	parentContext context.Context,
+	task Task,
+) {
+	processingContext, cancelProcessing :=
+		context.WithCancelCause(parentContext)
+
+	defer cancelProcessing(nil)
+
+	processResult := make(chan error, 1)
+
+	go func() {
+		processResult <- w.processor.Process(
+			processingContext,
+			task,
 		)
-		return
-	}
+	}()
 
-	log.Printf(
-		"worker %s claimed task %s: severity=%s team=%s attempt=%d lease_expires_at=%v",
-		w.workerID,
-		claimedTask.ID,
-		claimedTask.Severity,
-		claimedTask.AssignedTeam,
-		claimedTask.AttemptCount,
-		claimedTask.LeaseExpiresAt,
-	)
+	renewalTicker := time.NewTicker(w.renewalInterval)
+	defer renewalTicker.Stop()
+
+	for {
+		select {
+		case <-parentContext.Done():
+			cancelProcessing(parentContext.Err())
+
+			log.Printf(
+				"worker %s stopped processing task %s; lease will expire",
+				w.workerID,
+				task.ID,
+			)
+
+			return
+
+		case processingError := <-processResult:
+			if processingError == nil {
+				log.Printf(
+					"worker %s processed task %s successfully",
+					w.workerID,
+					task.ID,
+				)
+
+				return
+			}
+
+			if errors.Is(processingError, context.Canceled) {
+				return
+			}
+
+			releaseContext, cancel := context.WithTimeout(
+				context.Background(),
+				5*time.Second,
+			)
+
+			err := w.repository.ReleaseForRetry(
+				releaseContext,
+				task,
+				w.workerID,
+				w.retryDelay,
+				processingError,
+			)
+
+			cancel()
+
+			if errors.Is(err, ErrLeaseLost) {
+				log.Printf(
+					"worker %s could not release task %s because ownership was lost",
+					w.workerID,
+					task.ID,
+				)
+
+				return
+			}
+
+			if err != nil {
+				log.Printf(
+					"worker %s failed to release task %s: %v",
+					w.workerID,
+					task.ID,
+					err,
+				)
+
+				return
+			}
+
+			log.Printf(
+				"worker %s released task %s for retry: %v",
+				w.workerID,
+				task.ID,
+				processingError,
+			)
+
+			return
+
+		case <-renewalTicker.C:
+			renewalContext, cancel := context.WithTimeout(
+				parentContext,
+				5*time.Second,
+			)
+
+			newExpiry, err := w.repository.RenewLease(
+				renewalContext,
+				task.ID.String(),
+				w.workerID,
+				w.leaseDuration,
+			)
+
+			cancel()
+
+			if errors.Is(err, ErrLeaseLost) {
+				cancelProcessing(ErrLeaseLost)
+
+				log.Printf(
+					"worker %s lost lease for task %s",
+					w.workerID,
+					task.ID,
+				)
+
+				return
+			}
+
+			if err != nil {
+				log.Printf(
+					"worker %s failed to renew task %s lease: %v",
+					w.workerID,
+					task.ID,
+					err,
+				)
+
+				continue
+			}
+
+			log.Printf(
+				"worker %s renewed task %s lease until %s",
+				w.workerID,
+				task.ID,
+				newExpiry.Format(time.RFC3339),
+			)
+		}
+	}
+}
+
+func waitForContext(
+	ctx context.Context,
+	duration time.Duration,
+) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+
+	case <-timer.C:
+		return nil
+	}
 }
