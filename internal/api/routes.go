@@ -5,6 +5,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/shraddharanjan/clinical-results-escalation-engine/internal/api/handlers"
 )
@@ -23,12 +24,19 @@ func NewRouter(
 	router.Get("/health", healthHandler.Handle)
 
 	router.Route("/v1", func(router chi.Router) {
-		router.Post("/results", resultHandler.Create)
+		router.Post(
+			"/results",
+			resultHandler.Create,
+		)
 
 		router.Post(
 			"/tasks/{taskID}/acknowledgements",
 			acknowledgementHandler.Create,
 		)
 	})
-	return router
+
+	return otelhttp.NewHandler(
+		router,
+		"clinical-results-api",
+	)
 }

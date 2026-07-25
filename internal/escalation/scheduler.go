@@ -7,6 +7,11 @@ import (
 	"log"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+
+	"github.com/shraddharanjan/clinical-results-escalation-engine/internal/platform/telemetry"
 	clinicaltask "github.com/shraddharanjan/clinical-results-escalation-engine/internal/task"
 )
 
@@ -19,12 +24,14 @@ type TaskEscalator interface {
 
 type Scheduler struct {
 	repository   TaskEscalator
+	metrics      *telemetry.Metrics
 	schedulerID  string
 	pollInterval time.Duration
 }
 
 func NewScheduler(
 	repository TaskEscalator,
+	metrics *telemetry.Metrics,
 	schedulerID string,
 	pollInterval time.Duration,
 ) (*Scheduler, error) {
@@ -47,6 +54,7 @@ func NewScheduler(
 
 	return &Scheduler{
 		repository:   repository,
+		metrics:      metrics,
 		schedulerID:  schedulerID,
 		pollInterval: pollInterval,
 	}, nil
@@ -67,10 +75,12 @@ func (s *Scheduler) Run(
 				"scheduler %s stopping",
 				s.schedulerID,
 			)
+
 			return nil
 		}
 
-		escalatedTask, err := s.escalateOne(ctx)
+		escalatedTask, err :=
+			s.escalateOne(ctx)
 
 		if errors.Is(err, ErrNoOverdueTask) {
 			if err := waitForContext(
@@ -107,6 +117,11 @@ func (s *Scheduler) Run(
 			continue
 		}
 
+		s.metrics.RecordEscalation(
+			ctx,
+			escalatedTask.EscalationLevel,
+		)
+
 		log.Printf(
 			"scheduler %s escalated task %s to level %d team=%s",
 			s.schedulerID,
@@ -120,17 +135,68 @@ func (s *Scheduler) Run(
 func (s *Scheduler) escalateOne(
 	ctx context.Context,
 ) (clinicaltask.Task, error) {
+	tracer := otel.Tracer(
+		"clinical-results-escalation-engine/escalation",
+	)
+
+	escalationContext, span := tracer.Start(
+		ctx,
+		"task.escalate",
+	)
+	defer span.End()
+
 	escalationContext, cancel :=
 		context.WithTimeout(
-			ctx,
+			escalationContext,
 			5*time.Second,
 		)
 	defer cancel()
 
-	return s.repository.EscalateOne(
-		escalationContext,
-		s.schedulerID,
+	escalatedTask, err :=
+		s.repository.EscalateOne(
+			escalationContext,
+			s.schedulerID,
+		)
+
+	if errors.Is(err, ErrNoOverdueTask) {
+		return clinicaltask.Task{}, err
+	}
+
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(
+			codes.Error,
+			err.Error(),
+		)
+
+		return clinicaltask.Task{}, err
+	}
+
+	span.SetAttributes(
+		attribute.String(
+			"clinical.task.id",
+			escalatedTask.ID.String(),
+		),
+		attribute.Int(
+			"clinical.task.escalation_level",
+			escalatedTask.EscalationLevel,
+		),
+		attribute.String(
+			"clinical.task.assigned_team",
+			escalatedTask.AssignedTeam,
+		),
+		attribute.String(
+			"scheduler.id",
+			s.schedulerID,
+		),
 	)
+
+	span.SetStatus(
+		codes.Ok,
+		"task escalated",
+	)
+
+	return escalatedTask, nil
 }
 
 func waitForContext(

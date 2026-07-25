@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/shraddharanjan/clinical-results-escalation-engine/internal/platform/telemetry"
 	clinicaltask "github.com/shraddharanjan/clinical-results-escalation-engine/internal/task"
 )
 
@@ -24,13 +25,16 @@ type TaskAcknowledger interface {
 
 type AcknowledgementHandler struct {
 	acknowledger TaskAcknowledger
+	metrics      *telemetry.Metrics
 }
 
 func NewAcknowledgementHandler(
 	acknowledger TaskAcknowledger,
+	metrics *telemetry.Metrics,
 ) *AcknowledgementHandler {
 	return &AcknowledgementHandler{
 		acknowledger: acknowledger,
+		metrics:      metrics,
 	}
 }
 
@@ -51,9 +55,13 @@ func (h *AcknowledgementHandler) Create(
 		chi.URLParam(r, "taskID"),
 	)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "task ID must be a valid UUID",
-		})
+		writeJSON(
+			w,
+			http.StatusBadRequest,
+			map[string]string{
+				"error": "task ID must be a valid UUID",
+			},
+		)
 		return
 	}
 
@@ -63,23 +71,35 @@ func (h *AcknowledgementHandler) Create(
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(&request); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "request body must contain valid JSON",
-		})
+		writeJSON(
+			w,
+			http.StatusBadRequest,
+			map[string]string{
+				"error": "request body must contain valid JSON",
+			},
+		)
 		return
 	}
 
 	if strings.TrimSpace(request.ClinicianID) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "clinician_id is required",
-		})
+		writeJSON(
+			w,
+			http.StatusBadRequest,
+			map[string]string{
+				"error": "clinician_id is required",
+			},
+		)
 		return
 	}
 
 	if request.ExpectedVersion <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "expected_version must be greater than zero",
-		})
+		writeJSON(
+			w,
+			http.StatusBadRequest,
+			map[string]string{
+				"error": "expected_version must be greater than zero",
+			},
+		)
 		return
 	}
 
@@ -91,18 +111,29 @@ func (h *AcknowledgementHandler) Create(
 	)
 	if err != nil {
 		switch {
-		case errors.Is(err, clinicaltask.ErrTaskNotFound):
-			writeJSON(w, http.StatusNotFound, map[string]string{
-				"error": "clinical task was not found",
-			})
+		case errors.Is(
+			err,
+			clinicaltask.ErrTaskNotFound,
+		):
+			writeJSON(
+				w,
+				http.StatusNotFound,
+				map[string]string{
+					"error": "clinical task was not found",
+				},
+			)
 
 		case errors.Is(
 			err,
 			clinicaltask.ErrTaskStateConflict,
 		):
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "task is no longer awaiting acknowledgement or its version has changed",
-			})
+			writeJSON(
+				w,
+				http.StatusConflict,
+				map[string]string{
+					"error": "task is no longer awaiting acknowledgement or its version has changed",
+				},
+			)
 
 		default:
 			writeJSON(
@@ -116,6 +147,12 @@ func (h *AcknowledgementHandler) Create(
 
 		return
 	}
+
+	h.metrics.RecordAcknowledgement(
+		r.Context(),
+		task.Severity,
+		0,
+	)
 
 	writeJSON(
 		w,

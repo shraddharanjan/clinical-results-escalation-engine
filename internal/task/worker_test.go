@@ -13,13 +13,12 @@ import (
 type fakeTaskStore struct {
 	mu sync.Mutex
 
-	claim              Claim
-	claimReturned      bool
-	renewalCount       int
-	releaseCount       int
-	releasedError      error
-	loseLeaseOnRenewal bool
-	failedCount        int
+	claim         Claim
+	claimReturned bool
+	renewalCount  int
+	releaseCount  int
+	failedCount   int
+	releasedError error
 }
 
 func (f *fakeTaskStore) ClaimOne(
@@ -37,7 +36,8 @@ func (f *fakeTaskStore) ClaimOne(
 	f.claimReturned = true
 
 	leaseOwner := workerID
-	leaseExpiry := time.Now().Add(50 * time.Millisecond)
+	leaseExpiry := time.Now().
+		Add(50 * time.Millisecond)
 
 	f.claim = Claim{
 		Task: Task{
@@ -67,11 +67,8 @@ func (f *fakeTaskStore) RenewLease(
 
 	f.renewalCount++
 
-	if f.loseLeaseOnRenewal {
-		return time.Time{}, ErrLeaseLost
-	}
-
-	return time.Now().Add(50 * time.Millisecond), nil
+	return time.Now().
+		Add(50 * time.Millisecond), nil
 }
 
 func (f *fakeTaskStore) ReleaseForRetry(
@@ -86,6 +83,20 @@ func (f *fakeTaskStore) ReleaseForRetry(
 
 	f.releaseCount++
 	f.releasedError = processingError
+
+	return nil
+}
+
+func (f *fakeTaskStore) MarkFailed(
+	_ context.Context,
+	_ Task,
+	_ string,
+	_ error,
+) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.failedCount++
 
 	return nil
 }
@@ -106,7 +117,9 @@ func (p slowFailingProcessor) Process(
 		return context.Cause(ctx)
 
 	case <-timer.C:
-		return errors.New("simulated processing failure")
+		return errors.New(
+			"simulated processing failure",
+		)
 	}
 }
 
@@ -122,6 +135,7 @@ func TestWorkerRenewsLeaseAndReleasesFailedTask(
 		slowFailingProcessor{
 			duration: 35 * time.Millisecond,
 		},
+		nil,
 		"test-worker",
 		5*time.Millisecond,
 		30*time.Millisecond,
@@ -129,7 +143,10 @@ func TestWorkerRenewsLeaseAndReleasesFailedTask(
 		20*time.Millisecond,
 	)
 	if err != nil {
-		t.Fatalf("create worker: %v", err)
+		t.Fatalf(
+			"create worker: %v",
+			err,
+		)
 	}
 
 	ctx, cancel := context.WithTimeout(
@@ -139,14 +156,19 @@ func TestWorkerRenewsLeaseAndReleasesFailedTask(
 	defer cancel()
 
 	if err := worker.Run(ctx); err != nil {
-		t.Fatalf("run worker: %v", err)
+		t.Fatalf(
+			"run worker: %v",
+			err,
+		)
 	}
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
 	if store.renewalCount == 0 {
-		t.Fatal("expected at least one lease renewal")
+		t.Fatal(
+			"expected at least one lease renewal",
+		)
 	}
 
 	if store.releaseCount != 1 {
@@ -157,20 +179,8 @@ func TestWorkerRenewsLeaseAndReleasesFailedTask(
 	}
 
 	if store.releasedError == nil {
-		t.Fatal("expected processing error to be recorded")
+		t.Fatal(
+			"expected processing error to be recorded",
+		)
 	}
-}
-
-func (f *fakeTaskStore) MarkFailed(
-	_ context.Context,
-	_ Task,
-	_ string,
-	_ error,
-) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	f.failedCount++
-
-	return nil
 }

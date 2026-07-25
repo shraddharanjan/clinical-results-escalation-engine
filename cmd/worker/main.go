@@ -13,6 +13,7 @@ import (
 
 	"github.com/shraddharanjan/clinical-results-escalation-engine/internal/notification"
 	"github.com/shraddharanjan/clinical-results-escalation-engine/internal/platform/database"
+	"github.com/shraddharanjan/clinical-results-escalation-engine/internal/platform/telemetry"
 	clinicaltask "github.com/shraddharanjan/clinical-results-escalation-engine/internal/task"
 )
 
@@ -24,12 +25,50 @@ func main() {
 
 func run() error {
 	if err := godotenv.Load(); err != nil {
-		log.Printf("warning: could not load .env file: %v", err)
+		log.Printf(
+			"warning: could not load .env file: %v",
+			err,
+		)
+	}
+
+	telemetryConfig, err :=
+		telemetry.ConfigFromEnvironment(
+			"clinical-notification-worker",
+		)
+	if err != nil {
+		return fmt.Errorf(
+			"load telemetry configuration: %w",
+			err,
+		)
+	}
+
+	telemetryProviders, err := telemetry.Initialise(
+		context.Background(),
+		telemetryConfig,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"initialise telemetry: %w",
+			err,
+		)
+	}
+
+	defer shutdownTelemetry(telemetryProviders)
+
+	applicationMetrics, err :=
+		telemetry.NewMetrics()
+	if err != nil {
+		return fmt.Errorf(
+			"create application metrics: %w",
+			err,
+		)
 	}
 
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
-		return fmt.Errorf("DATABASE_URL is required")
+		return fmt.Errorf(
+			"DATABASE_URL is required",
+		)
 	}
 
 	workerID, err := resolveWorkerID()
@@ -53,10 +92,11 @@ func run() error {
 		return err
 	}
 
-	renewalInterval, err := durationFromEnvironment(
-		"WORKER_RENEWAL_INTERVAL",
-		10*time.Second,
-	)
+	renewalInterval, err :=
+		durationFromEnvironment(
+			"WORKER_RENEWAL_INTERVAL",
+			10*time.Second,
+		)
 	if err != nil {
 		return err
 	}
@@ -69,20 +109,25 @@ func run() error {
 		return err
 	}
 
-	providerLatency, err := durationFromEnvironment(
-		"FAKE_NOTIFICATION_LATENCY",
-		100*time.Millisecond,
-	)
+	providerLatency, err :=
+		durationFromEnvironment(
+			"FAKE_NOTIFICATION_LATENCY",
+			100*time.Millisecond,
+		)
 	if err != nil {
 		return err
 	}
 
-	providerFailureMode := notification.FailureMode(
-		os.Getenv("FAKE_NOTIFICATION_MODE"),
-	)
+	providerFailureMode :=
+		notification.FailureMode(
+			os.Getenv(
+				"FAKE_NOTIFICATION_MODE",
+			),
+		)
 
 	if providerFailureMode == "" {
-		providerFailureMode = notification.FailureModeSuccess
+		providerFailureMode =
+			notification.FailureModeSuccess
 	}
 
 	ctx, stop := signal.NotifyContext(
@@ -104,19 +149,22 @@ func run() error {
 	}
 	defer databasePool.Close()
 
-	taskRepository := clinicaltask.NewPostgresRepository(
-		databasePool,
-	)
+	taskRepository :=
+		clinicaltask.NewPostgresRepository(
+			databasePool,
+		)
 
-	notificationRepository := notification.NewRepository(
-		databasePool,
-	)
+	notificationRepository :=
+		notification.NewRepository(
+			databasePool,
+		)
 
-	notificationProvider, err := notification.NewFakeProvider(
-		databasePool,
-		providerFailureMode,
-		providerLatency,
-	)
+	notificationProvider, err :=
+		notification.NewFakeProvider(
+			databasePool,
+			providerFailureMode,
+			providerLatency,
+		)
 	if err != nil {
 		return fmt.Errorf(
 			"create fake notification provider: %w",
@@ -124,11 +172,13 @@ func run() error {
 		)
 	}
 
-	notificationProcessor, err := notification.NewProcessor(
-		notificationRepository,
-		notificationProvider,
-		retryDelay,
-	)
+	notificationProcessor, err :=
+		notification.NewProcessor(
+			notificationRepository,
+			notificationProvider,
+			applicationMetrics,
+			retryDelay,
+		)
 	if err != nil {
 		return fmt.Errorf(
 			"create notification processor: %w",
@@ -139,6 +189,7 @@ func run() error {
 	worker, err := clinicaltask.NewWorker(
 		taskRepository,
 		notificationProcessor,
+		applicationMetrics,
 		workerID,
 		pollInterval,
 		leaseDuration,
@@ -163,7 +214,9 @@ func run() error {
 }
 
 func resolveWorkerID() (string, error) {
-	if configuredID := os.Getenv("WORKER_ID"); configuredID != "" {
+	if configuredID := os.Getenv(
+		"WORKER_ID",
+	); configuredID != "" {
 		return configuredID, nil
 	}
 
@@ -210,4 +263,23 @@ func durationFromEnvironment(
 	}
 
 	return duration, nil
+}
+
+func shutdownTelemetry(
+	providers *telemetry.Providers,
+) {
+	shutdownContext, cancel := context.WithTimeout(
+		context.Background(),
+		5*time.Second,
+	)
+	defer cancel()
+
+	if err := providers.Shutdown(
+		shutdownContext,
+	); err != nil {
+		log.Printf(
+			"shut down telemetry: %v",
+			err,
+		)
+	}
 }

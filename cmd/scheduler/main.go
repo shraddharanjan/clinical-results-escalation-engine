@@ -13,6 +13,7 @@ import (
 
 	"github.com/shraddharanjan/clinical-results-escalation-engine/internal/escalation"
 	"github.com/shraddharanjan/clinical-results-escalation-engine/internal/platform/database"
+	"github.com/shraddharanjan/clinical-results-escalation-engine/internal/platform/telemetry"
 )
 
 func main() {
@@ -29,12 +30,48 @@ func run() error {
 		)
 	}
 
+	telemetryConfig, err :=
+		telemetry.ConfigFromEnvironment(
+			"clinical-escalation-scheduler",
+		)
+	if err != nil {
+		return fmt.Errorf(
+			"load telemetry configuration: %w",
+			err,
+		)
+	}
+
+	telemetryProviders, err := telemetry.Initialise(
+		context.Background(),
+		telemetryConfig,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"initialise telemetry: %w",
+			err,
+		)
+	}
+
+	defer shutdownTelemetry(telemetryProviders)
+
+	applicationMetrics, err :=
+		telemetry.NewMetrics()
+	if err != nil {
+		return fmt.Errorf(
+			"create application metrics: %w",
+			err,
+		)
+	}
+
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
-		return fmt.Errorf("DATABASE_URL is required")
+		return fmt.Errorf(
+			"DATABASE_URL is required",
+		)
 	}
 
 	schedulerID := os.Getenv("SCHEDULER_ID")
+
 	if schedulerID == "" {
 		hostname, err := os.Hostname()
 		if err != nil {
@@ -51,10 +88,11 @@ func run() error {
 		)
 	}
 
-	pollInterval, err := durationFromEnvironment(
-		"SCHEDULER_POLL_INTERVAL",
-		time.Second,
-	)
+	pollInterval, err :=
+		durationFromEnvironment(
+			"SCHEDULER_POLL_INTERVAL",
+			time.Second,
+		)
 	if err != nil {
 		return err
 	}
@@ -84,6 +122,7 @@ func run() error {
 
 	scheduler, err := escalation.NewScheduler(
 		repository,
+		applicationMetrics,
 		schedulerID,
 		pollInterval,
 	)
@@ -132,4 +171,23 @@ func durationFromEnvironment(
 	}
 
 	return duration, nil
+}
+
+func shutdownTelemetry(
+	providers *telemetry.Providers,
+) {
+	shutdownContext, cancel := context.WithTimeout(
+		context.Background(),
+		5*time.Second,
+	)
+	defer cancel()
+
+	if err := providers.Shutdown(
+		shutdownContext,
+	); err != nil {
+		log.Printf(
+			"shut down telemetry: %v",
+			err,
+		)
+	}
 }
