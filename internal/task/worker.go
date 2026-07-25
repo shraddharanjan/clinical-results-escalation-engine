@@ -29,8 +29,14 @@ type TaskStore interface {
 		retryDelay time.Duration,
 		processingError error,
 	) error
-}
 
+	MarkFailed(
+		ctx context.Context,
+		task Task,
+		workerID string,
+		processingError error,
+	) error
+}
 type Worker struct {
 	repository      TaskStore
 	processor       Processor
@@ -222,7 +228,54 @@ func (w *Worker) processClaim(
 				context.Background(),
 				5*time.Second,
 			)
+			if errors.Is(
+				processingError,
+				ErrPermanentProcessing,
+			) {
+				failureContext, cancelFailure := context.WithTimeout(
+					context.Background(),
+					5*time.Second,
+				)
 
+				err := w.repository.MarkFailed(
+					failureContext,
+					task,
+					w.workerID,
+					processingError,
+				)
+
+				cancelFailure()
+
+				if errors.Is(err, ErrLeaseLost) {
+					log.Printf(
+						"worker %s could not fail task %s because ownership was lost",
+						w.workerID,
+						task.ID,
+					)
+
+					return
+				}
+
+				if err != nil {
+					log.Printf(
+						"worker %s failed to mark task %s failed: %v",
+						w.workerID,
+						task.ID,
+						err,
+					)
+
+					return
+				}
+
+				log.Printf(
+					"worker %s marked task %s permanently failed: %v",
+					w.workerID,
+					task.ID,
+					processingError,
+				)
+
+				return
+			}
 			err := w.repository.ReleaseForRetry(
 				releaseContext,
 				task,

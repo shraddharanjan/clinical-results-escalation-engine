@@ -17,6 +17,13 @@ const (
 	EventTaskClaimed                   = "task_claimed"
 	EventTaskRecoveredAfterLeaseExpiry = "task_recovered_after_lease_expiry"
 	EventTaskReleasedForRetry          = "task_released_for_retry"
+	EventNotificationRequested         = "notification_requested"
+
+	EventNotificationDelivered       = "notification_delivered"
+	EventNotificationTemporaryFailed = "notification_temporary_failed"
+	EventNotificationPermanentFailed = "notification_permanent_failed"
+	EventTaskAwaitingAcknowledgement = "task_awaiting_acknowledgement"
+	EventTaskFailed                  = "task_failed"
 )
 
 type Event struct {

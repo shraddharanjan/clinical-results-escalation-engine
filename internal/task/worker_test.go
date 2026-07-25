@@ -19,6 +19,7 @@ type fakeTaskStore struct {
 	releaseCount       int
 	releasedError      error
 	loseLeaseOnRenewal bool
+	failedCount        int
 }
 
 func (f *fakeTaskStore) ClaimOne(
@@ -158,4 +159,18 @@ func TestWorkerRenewsLeaseAndReleasesFailedTask(
 	if store.releasedError == nil {
 		t.Fatal("expected processing error to be recorded")
 	}
+}
+
+func (f *fakeTaskStore) MarkFailed(
+	_ context.Context,
+	_ Task,
+	_ string,
+	_ error,
+) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.failedCount++
+
+	return nil
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/joho/godotenv"
 
+	"github.com/shraddharanjan/clinical-results-escalation-engine/internal/notification"
 	"github.com/shraddharanjan/clinical-results-escalation-engine/internal/platform/database"
 	clinicaltask "github.com/shraddharanjan/clinical-results-escalation-engine/internal/task"
 )
@@ -60,20 +61,28 @@ func run() error {
 		return err
 	}
 
-	processingDuration, err := durationFromEnvironment(
-		"WORKER_PROCESSING_DURATION",
-		20*time.Second,
-	)
-	if err != nil {
-		return err
-	}
-
 	retryDelay, err := durationFromEnvironment(
 		"WORKER_RETRY_DELAY",
 		30*time.Second,
 	)
 	if err != nil {
 		return err
+	}
+
+	providerLatency, err := durationFromEnvironment(
+		"FAKE_NOTIFICATION_LATENCY",
+		100*time.Millisecond,
+	)
+	if err != nil {
+		return err
+	}
+
+	providerFailureMode := notification.FailureMode(
+		os.Getenv("FAKE_NOTIFICATION_MODE"),
+	)
+
+	if providerFailureMode == "" {
+		providerFailureMode = notification.FailureModeSuccess
 	}
 
 	ctx, stop := signal.NotifyContext(
@@ -83,9 +92,15 @@ func run() error {
 	)
 	defer stop()
 
-	databasePool, err := database.Connect(ctx, databaseURL)
+	databasePool, err := database.Connect(
+		ctx,
+		databaseURL,
+	)
 	if err != nil {
-		return fmt.Errorf("connect to database: %w", err)
+		return fmt.Errorf(
+			"connect to database: %w",
+			err,
+		)
 	}
 	defer databasePool.Close()
 
@@ -93,16 +108,37 @@ func run() error {
 		databasePool,
 	)
 
-	processor, err := clinicaltask.NewPlaceholderProcessor(
-		processingDuration,
+	notificationRepository := notification.NewRepository(
+		databasePool,
+	)
+
+	notificationProvider, err := notification.NewFakeProvider(
+		databasePool,
+		providerFailureMode,
+		providerLatency,
 	)
 	if err != nil {
-		return fmt.Errorf("create task processor: %w", err)
+		return fmt.Errorf(
+			"create fake notification provider: %w",
+			err,
+		)
+	}
+
+	notificationProcessor, err := notification.NewProcessor(
+		notificationRepository,
+		notificationProvider,
+		retryDelay,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"create notification processor: %w",
+			err,
+		)
 	}
 
 	worker, err := clinicaltask.NewWorker(
 		taskRepository,
-		processor,
+		notificationProcessor,
 		workerID,
 		pollInterval,
 		leaseDuration,
@@ -110,10 +146,17 @@ func run() error {
 		retryDelay,
 	)
 	if err != nil {
-		return fmt.Errorf("create worker: %w", err)
+		return fmt.Errorf(
+			"create worker: %w",
+			err,
+		)
 	}
+
 	if err := worker.Run(ctx); err != nil {
-		return fmt.Errorf("run worker: %w", err)
+		return fmt.Errorf(
+			"run worker: %w",
+			err,
+		)
 	}
 
 	return nil
@@ -126,7 +169,10 @@ func resolveWorkerID() (string, error) {
 
 	hostname, err := os.Hostname()
 	if err != nil {
-		return "", fmt.Errorf("read hostname: %w", err)
+		return "", fmt.Errorf(
+			"read hostname: %w",
+			err,
+		)
 	}
 
 	return fmt.Sprintf(

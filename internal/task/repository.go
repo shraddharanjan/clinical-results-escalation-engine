@@ -448,3 +448,116 @@ func (r *PostgresRepository) ReleaseForRetry(
 
 	return nil
 }
+
+func (r *PostgresRepository) MarkFailed(
+	ctx context.Context,
+	task Task,
+	workerID string,
+	processingError error,
+) error {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf(
+			"begin mark-failed transaction: %w",
+			err,
+		)
+	}
+
+	defer func() {
+		_ = tx.Rollback(context.Background())
+	}()
+
+	errorMessage := "unknown permanent processing failure"
+
+	if processingError != nil {
+		errorMessage = processingError.Error()
+	}
+
+	const updateQuery = `
+		UPDATE clinical_tasks
+		SET
+			status = 'failed',
+			lease_owner = NULL,
+			lease_expires_at = NULL,
+			last_error = $3,
+			version = version + 1,
+			updated_at = now()
+		WHERE
+			id = $1
+			AND status = 'processing'
+			AND lease_owner = $2
+			AND lease_expires_at > now()
+		RETURNING version
+	`
+
+	var newVersion int64
+
+	err = tx.QueryRow(
+		ctx,
+		updateQuery,
+		task.ID,
+		workerID,
+		errorMessage,
+	).Scan(&newVersion)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrLeaseLost
+	}
+
+	if err != nil {
+		return fmt.Errorf(
+			"mark task failed: %w",
+			err,
+		)
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"worker_id": workerID,
+		"reason":    errorMessage,
+		"version":   newVersion,
+	})
+	if err != nil {
+		return fmt.Errorf(
+			"marshal task failed payload: %w",
+			err,
+		)
+	}
+
+	const auditQuery = `
+		INSERT INTO audit_events (
+			aggregate_type,
+			aggregate_id,
+			event_type,
+			actor_type,
+			actor_id,
+			payload
+		)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`
+
+	_, err = tx.Exec(
+		ctx,
+		auditQuery,
+		audit.AggregateClinicalTask,
+		task.ID,
+		audit.EventTaskFailed,
+		"worker",
+		workerID,
+		payload,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"insert task failed audit event: %w",
+			err,
+		)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf(
+			"commit mark-failed transaction: %w",
+			err,
+		)
+	}
+
+	return nil
+}
