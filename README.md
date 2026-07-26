@@ -589,12 +589,12 @@ Measured local result:
 | Concurrency | 50 |
 | Successful | 1,000 |
 | Failed | 0 |
-| Throughput | 204.15 requests/second |
-| p50 latency | 162 ms |
-| p95 latency | 532 ms |
-| p99 latency | 817 ms |
-| Maximum latency | 3.03 s |
-
+| Total duration | 4.10 s |
+| Throughput | 243.61 requests/second |
+| p50 latency | 171 ms |
+| p95 latency | 330 ms |
+| p99 latency | 758 ms |
+| Maximum latency | 780 ms |
 ![Load-test results](docs/images/load-test-results.png)
 
 > This benchmark measures the result-ingestion endpoint on a local Windows and Docker Desktop environment. Each request performs validation, classification and transactional creation of the result, task and initial audit events. It is not a benchmark of complete end-to-end workflow completion.
