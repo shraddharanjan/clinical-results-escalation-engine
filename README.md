@@ -1,214 +1,134 @@
 # Clinical Results Escalation Engine
 
-A fault-tolerant clinical workflow engine built with Go, PostgreSQL and OpenTelemetry.
+A fault-tolerant clinical workflow engine built with Go, PostgreSQL, React and OpenTelemetry.
 
-The system ingests synthetic clinical results, classifies their urgency, creates durable review tasks, sends idempotent notifications, waits for clinician acknowledgement and escalates unacknowledged tasks through configurable responsibility levels.
+The system accepts synthetic clinical results, classifies urgency, creates durable review tasks, delivers idempotent notifications, waits for clinician acknowledgement and escalates unacknowledged tasks through configurable responsibility levels.
 
 > **Educational project only:** This application uses synthetic data and demonstration-only rules. It is not a medical device, does not provide clinical advice and must not be used with real patient data.
 
----
+## Live demo
 
-## Overview
+- **Clinician dashboard:** (https://clinical-results-escalation-engine.vercel.app/)
+- **Public API:** `https://clinical-results-api.onrender.com`
+- **Health check:** `https://clinical-results-api.onrender.com/health`
 
-Hospital workflows often require more than storing a result. A result must be routed to the correct team, acknowledged within a deadline, escalated when no response is received and recorded in an auditable history.
+The hosted demo uses a Vite/React frontend on Vercel, a containerised Go API on Render and PostgreSQL on Neon. The complete worker, scheduler and observability stack can also be run locally with Docker Compose.
 
-This project models that workflow:
+Because the public API uses a free hosting tier, the first request after inactivity may take longer while the service wakes up.
+
+## Demonstration flow
 
 ```text
-Result received
-    ↓
-Validate and classify urgency
-    ↓
-Create durable clinical task
-    ↓
-Notify responsible team
-    ↓
-Await acknowledgement
-    ↓
-Acknowledge or escalate
-    ↓
-Record every transition
+Submit synthetic potassium result: 6.8 mmol/L
+        ↓
+Go API validates and classifies it as critical
+        ↓
+PostgreSQL transaction creates result, task and audit events
+        ↓
+Worker claims task and performs idempotent notification delivery
+        ↓
+Task waits for clinician acknowledgement
+        ↓
+Clinician acknowledges or scheduler escalates after the deadline
 ```
 
-Example synthetic result:
+## Clinician dashboard
 
-```json
-{
-  "source_system": "laboratory-simulator",
-  "source_result_id": "LIMS-839211",
-  "patient_reference": "P-1042",
-  "test_code": "serum_potassium",
-  "value": 6.8,
-  "unit": "mmol/L",
-  "reported_at": "2026-07-24T14:30:00Z"
-}
-```
+The React dashboard provides:
 
-The result may create a critical review task assigned to `acute-medicine`, followed by escalation to the medical registrar, consultant on call and site operations team if acknowledgement deadlines are missed.
+- live result and task data from the Go API;
+- severity and status filtering;
+- patient-reference and task search;
+- synthetic result submission;
+- task details and acknowledgement deadlines;
+- clinician acknowledgement using optimistic version checks;
+- escalation and status views;
+- automatic polling of PostgreSQL-backed state;
+- responsive desktop and mobile layouts.
 
----
+![Clinician dashboard](docs/images/clinical-dashboard-ui.png)
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    L[Laboratory Simulator] -->|POST /v1/results| API[Results Ingestion API]
-
-    API --> V[Validation and Classification]
+    UI[React clinician dashboard] -->|HTTPS| API[Go API]
+    API --> V[Validation and classification]
     V --> DB[(PostgreSQL)]
 
-    DB --> R[Clinical Results]
-    DB --> T[Clinical Tasks]
-    DB --> N[Notification Attempts]
-    DB --> A[Append-only Audit Events]
+    DB --> R[Clinical results]
+    DB --> T[Clinical tasks]
+    DB --> N[Notification attempts]
+    DB --> A[Append-only audit events]
 
-    T --> W1[Notification Worker A]
-    T --> W2[Notification Worker B]
-    T --> W3[Notification Worker N]
-
-    W1 --> P[Fake Notification Provider]
+    T --> W1[Worker A]
+    T --> W2[Worker B]
+    W1 --> P[Notification provider]
     W2 --> P
-    W3 --> P
 
-    P --> ACK[Awaiting Acknowledgement]
-
+    P --> ACK[Awaiting acknowledgement]
     ACK -->|Clinician responds| API
-    ACK -->|Deadline expires| S[Escalation Scheduler]
-
+    ACK -->|Deadline expires| S[Escalation scheduler]
     S --> T
 ```
 
-### Observability
+### Local observability
 
 ```mermaid
 flowchart LR
     API[API] -->|OTLP| OTel[OpenTelemetry Collector]
     Worker[Worker] -->|OTLP| OTel
     Scheduler[Scheduler] -->|OTLP| OTel
-
     OTel --> Jaeger[Jaeger]
     OTel --> Prometheus[Prometheus]
     Prometheus --> Grafana[Grafana]
 ```
 
----
+OpenTelemetry export can be disabled in environments without a collector:
+
+```env
+OTEL_ENABLED=false
+```
 
 ## Core engineering features
 
 ### Transactional workflow creation
 
-Result ingestion creates the following in one PostgreSQL transaction:
-
-- clinical result;
-- review task;
-- `result_received` audit event;
-- `result_classified` audit event;
-- `task_created` audit event.
-
-If task creation or audit insertion fails, the result insert is rolled back.
-
-This prevents a clinical result from being stored without creating the work required to review it.
+Result ingestion creates the clinical result, review task and initial audit events in one PostgreSQL transaction. If any part fails, the whole operation rolls back.
 
 ### Multi-worker task claiming
 
-Workers claim tasks using:
+Workers use:
 
 ```sql
 FOR UPDATE SKIP LOCKED
 ```
 
-This allows multiple worker processes to compete for tasks without claiming the same row concurrently.
+This allows multiple processes to compete for work without claiming the same task concurrently. Selection is severity-aware and FIFO within the same severity.
 
-Tasks are selected in this order:
+### Renewable leases and crash recovery
 
-1. critical;
-2. urgent;
-3. routine;
-4. oldest available task within the same severity.
+Claimed tasks store a lease owner and expiry time. Workers renew leases while processing. If a worker crashes, renewal stops and another worker can recover the task after expiry.
 
-### Renewable leases
+All worker updates verify ownership and lease validity to prevent a stale worker from updating a recovered task.
 
-A claimed task stores:
+### Idempotent notifications
 
-```text
-lease_owner
-lease_expires_at
-```
-
-Workers periodically renew their leases while processing.
-
-If a worker stops or crashes:
-
-```text
-renewals stop
-→ lease expires
-→ another worker recovers the task
-```
-
-All worker updates verify that:
-
-```text
-status = processing
-lease_owner = current worker
-lease has not expired
-```
-
-This prevents a stale worker from updating a task after another worker has recovered it.
-
-### Idempotent notification delivery
-
-Each logical notification uses a deterministic idempotency key:
+Each logical notification uses a deterministic key:
 
 ```text
 task:{task_id}:level:{level}:recipient:{recipient}:channel:{channel}
 ```
 
-Notification delivery is at-least-once, but duplicate external effects are controlled through provider-side idempotency.
+The workflow is at-least-once, while provider-side idempotency prevents duplicate external effects after retries or ambiguous responses.
 
-The fake provider can simulate:
+### Acknowledgement and escalation races
 
-- successful delivery;
-- temporary failure;
-- permanent failure;
-- accepted delivery followed by a lost response.
-
-In the lost-response scenario, the worker retries using the same idempotency key and the provider returns the original delivery rather than creating another one.
-
-### Acknowledgement and escalation
-
-After notification delivery, a task enters:
-
-```text
-awaiting_ack
-```
-
-The acknowledgement endpoint requires:
-
-```text
-status = awaiting_ack
-version = expected_version
-```
-
-The escalation scheduler also operates on the task version and locks overdue rows before updating them.
-
-This ensures that an acknowledgement and escalation racing against the same task version cannot both succeed.
-
-### Maximum escalation handling
-
-The demonstration escalation chain is:
-
-```text
-Level 0: responsible team
-Level 1: medical registrar
-Level 2: consultant on call
-Level 3: site operations team
-```
-
-If the final level also misses its deadline, the task is marked `failed` and requires manual intervention rather than escalating indefinitely.
+Acknowledgement requires the expected task version and valid state. The scheduler also checks and increments the task version. Only one transition can win against a given version.
 
 ### Append-only audit history
 
-Domain transitions are recorded as structured audit events, including:
+Durable audit events include:
 
 ```text
 result_received
@@ -228,45 +148,36 @@ task_escalation_exhausted
 task_failed
 ```
 
-The audit log is separate from application logs and represents durable workflow history.
-
----
-
 ## Task state machine
 
 ```mermaid
 stateDiagram-v2
     [*] --> pending
-
     pending --> processing: worker claim
     escalated --> processing: worker claim
     processing --> pending: retryable failure
     processing --> awaiting_ack: notification delivered
     processing --> failed: permanent failure
-
     awaiting_ack --> acknowledged: clinician acknowledgement
-    awaiting_ack --> pending: acknowledgement deadline missed
+    awaiting_ack --> pending: deadline missed and escalation available
     awaiting_ack --> failed: maximum escalation exhausted
-
     acknowledged --> completed
 ```
 
----
-
 ## Technology stack
 
-- **Go** — API, workers, scheduler and load generator
-- **PostgreSQL 17** — workflow state, queue coordination and audit history
-- **pgx** — explicit PostgreSQL transactions and locking
-- **Chi** — HTTP routing
-- **Docker Compose** — local infrastructure
+- **Go** — API, worker, scheduler and load generator
+- **React + TypeScript + Vite** — clinician dashboard
+- **PostgreSQL 17 / Neon** — workflow state, queue coordination and audit history
+- **pgx** — explicit transactions and PostgreSQL locking
+- **Chi** — HTTP routing and middleware
+- **Docker / Docker Compose** — service packaging and local infrastructure
 - **OpenTelemetry** — tracing and metrics
-- **OpenTelemetry Collector** — telemetry processing and export
 - **Jaeger** — distributed trace visualisation
-- **Prometheus** — metric storage and querying
-- **Grafana** — dashboards
-
----
+- **Prometheus** — metrics collection
+- **Grafana** — operational dashboards
+- **Render** — hosted Go API
+- **Vercel** — hosted frontend
 
 ## Repository structure
 
@@ -277,120 +188,86 @@ clinical-results-escalation-engine/
 │   ├── worker/
 │   ├── scheduler/
 │   └── loadgen/
-│
 ├── internal/
 │   ├── api/
 │   ├── audit/
 │   ├── escalation/
 │   ├── notification/
 │   ├── platform/
-│   │   ├── database/
-│   │   └── telemetry/
 │   ├── result/
 │   └── task/
-│
 ├── migrations/
 ├── deployments/
 ├── tests/
 │   └── integration/
 ├── docs/
 │   └── images/
+├── ui/
+├── Dockerfile
 ├── go.mod
 └── README.md
 ```
-
----
 
 ## Running locally
 
 ### Requirements
 
-Install:
+- Go
+- Node.js 22 or newer
+- Docker Desktop
+- Git
 
-- Go;
-- Docker Desktop;
-- Git.
-
-### 1. Clone the repository
-
-```bash
-git clone git@github.com:shraddharanjan/clinical-results-escalation-engine.git
-cd clinical-results-escalation-engine
-```
-
-### 2. Create the local environment file
-
-PowerShell:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-The default local configuration uses:
-
-```env
-HTTP_PORT=8080
-DATABASE_URL=postgres://clinical_user:clinical_password@localhost:5432/clinical_results?sslmode=disable
-
-WORKER_POLL_INTERVAL=500ms
-WORKER_LEASE_DURATION=30s
-WORKER_RENEWAL_INTERVAL=10s
-WORKER_RETRY_DELAY=30s
-
-FAKE_NOTIFICATION_MODE=success
-FAKE_NOTIFICATION_LATENCY=100ms
-
-SCHEDULER_POLL_INTERVAL=1s
-
-APP_ENVIRONMENT=development
-APP_VERSION=0.1.0
-
-OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317
-OTEL_EXPORTER_OTLP_INSECURE=true
-```
-
-### 3. Start infrastructure
+### Start infrastructure
 
 ```powershell
 docker compose -f deployments\docker-compose.yml up -d
 ```
 
-Check the containers:
+### Start backend processes
 
-```powershell
-docker compose -f deployments\docker-compose.yml ps
-```
-
-### 4. Start the API
+API:
 
 ```powershell
 go run ./cmd/api
 ```
 
-### 5. Start a worker
-
-In a second terminal:
+Worker:
 
 ```powershell
 go run ./cmd/worker
 ```
 
-### 6. Start the escalation scheduler
-
-In a third terminal:
+Scheduler:
 
 ```powershell
 go run ./cmd/scheduler
 ```
 
----
+### Start the UI
 
-## API usage
+```powershell
+cd ui
+npm install
+Copy-Item .env.example .env.local
+npm run dev
+```
 
-### Health check
+Example `ui/.env.local`:
+
+```env
+VITE_API_URL=http://localhost:8080
+VITE_USE_MOCKS=false
+```
+
+Open `http://localhost:5173`.
+
+## API
+
+### Read results and tasks
 
 ```http
-GET /health
+GET /v1/results
+GET /v1/tasks
 ```
 
 ### Submit a result
@@ -404,32 +281,12 @@ Content-Type: application/json
 {
   "source_system": "laboratory-simulator",
   "source_result_id": "LIMS-DEMO-001",
-  "patient_reference": "P-1042",
+  "patient_reference": "P-DEMO-1042",
   "test_code": "serum_potassium",
   "value": 6.8,
   "unit": "mmol/L",
   "reported_at": "2026-07-24T14:30:00Z"
 }
-```
-
-PowerShell:
-
-```powershell
-$body = @{
-    source_system      = "laboratory-simulator"
-    source_result_id   = "LIMS-DEMO-001"
-    patient_reference = "P-1042"
-    test_code          = "serum_potassium"
-    value              = 6.8
-    unit               = "mmol/L"
-    reported_at        = (Get-Date).ToUniversalTime().AddMinutes(-1).ToString("o")
-} | ConvertTo-Json
-
-Invoke-RestMethod `
-  -Method Post `
-  -Uri "http://localhost:8080/v1/results" `
-  -ContentType "application/json" `
-  -Body $body
 ```
 
 ### Acknowledge a task
@@ -446,13 +303,7 @@ Content-Type: application/json
 }
 ```
 
-A stale version or invalid state returns:
-
-```http
-409 Conflict
-```
-
----
+A stale version or invalid state returns `409 Conflict`.
 
 ## Failure simulation
 
@@ -465,123 +316,49 @@ FAKE_NOTIFICATION_MODE=permanent
 FAKE_NOTIFICATION_MODE=lost_response
 ```
 
-Example:
-
-```powershell
-$env:FAKE_NOTIFICATION_MODE="lost_response"
-$env:WORKER_RETRY_DELAY="5s"
-
-go run ./cmd/worker
-```
-
----
+The lost-response scenario simulates an accepted delivery whose response is lost. A retry with the same idempotency key reconciles with the original delivery.
 
 ## Observability
 
 ### Grafana
 
-Open:
-
-```text
-http://localhost:3000
-```
-
-Default local credentials:
-
-```text
-Username: admin
-Password: admin
-```
-
-Prometheus data-source URL from inside Docker:
-
-```text
-http://prometheus:9090
-```
+Open `http://localhost:3000`.
 
 ![Clinical workflow dashboard](docs/images/grafana-clinical-workflow-dashboard.png)
 
-*Workflow and notification metrics exported through OpenTelemetry and visualised in Grafana.*
-
 ### Jaeger
 
-Open:
-
-```text
-http://localhost:16686
-```
-
-#### Result-ingestion trace
+Open `http://localhost:16686`.
 
 ![Result ingestion trace](docs/images/jaeger-result-ingestion-trace.png)
 
-*HTTP and application spans for transactional creation of a clinical result and review task.*
-
-#### Notification worker trace
-
 ![Notification worker trace](docs/images/jaeger-notification-trace.png)
-
-*Worker task processing with a nested notification-delivery span.*
-
-#### Idempotent retry
 
 ![Idempotent notification retry](docs/images/jaeger-idempotent-retry.png)
 
-*A repeated send reconciled with an existing provider delivery using the same idempotency key.*
-
----
-
 ## Testing
-
-### Unit tests
-
-```powershell
-go test ./...
-```
-
-### Static checks
 
 ```powershell
 go fmt ./...
 go vet ./...
+go test ./cmd/... ./internal/... ./tests/...
 ```
 
-### Integration database
+For the integration database:
 
 ```powershell
 docker compose -f deployments\docker-compose.yml up -d postgres-test
-```
 
-Configure:
-
-```powershell
 $env:TEST_DATABASE_URL="postgres://clinical_test_user:clinical_test_password@localhost:5433/clinical_results_test?sslmode=disable"
-```
 
-Run:
-
-```powershell
 go test ./tests/integration -count=1 -v
 ```
 
 ![Integration tests](docs/images/integration-tests.png)
 
-The concurrency test starts multiple workers against the same queue and verifies that every task is claimed once without duplicate `task_claimed` events.
-
----
-
 ## Load benchmark
 
-The load generator sends concurrent synthetic result-ingestion requests:
-
-```powershell
-$env:LOAD_REQUEST_COUNT="1000"
-$env:LOAD_CONCURRENCY="50"
-
-go run ./cmd/loadgen
-```
-
-Measured local result:
+Local synthetic ingestion benchmark:
 
 | Metric | Result |
 |---|---:|
@@ -595,116 +372,70 @@ Measured local result:
 | p95 latency | 330 ms |
 | p99 latency | 758 ms |
 | Maximum latency | 780 ms |
+
 ![Load-test results](docs/images/load-test-results.png)
 
-> This benchmark measures the result-ingestion endpoint on a local Windows and Docker Desktop environment. Each request performs validation, classification and transactional creation of the result, task and initial audit events. It is not a benchmark of complete end-to-end workflow completion.
+The benchmark covers validation, classification and transactional creation of the result, task and initial audit events on a local Windows and Docker Desktop environment.
 
----
+## Design decisions
 
-## Important design decisions
+### Why PostgreSQL rather than Redis?
 
-### Why PostgreSQL instead of Redis?
+Tasks are durable workflow state. PostgreSQL allows result creation, task creation and audit insertion to commit atomically while also providing row locking, delayed availability and lease storage.
 
-Clinical tasks are durable workflow state, not ephemeral messages.
+### Why PostgreSQL rather than Kafka?
 
-PostgreSQL allows result creation, task creation and audit insertion to commit atomically. It also provides row locking, delayed availability and lease storage without introducing another authoritative system.
-
-Redis could later be used for short-lived caching, throttling or presence information, but not as the workflow source of truth.
-
-### Why PostgreSQL instead of Kafka?
-
-The core workflow requires immediate transactional consistency between:
-
-```text
-result
-task
-audit events
-```
-
-Kafka would introduce a database-and-broker dual-write problem.
-
-A future Kafka integration would use a transactional outbox and would be limited to downstream events such as analytics, search indexing or external integration.
+The core operation requires immediate consistency between the result, task and audit events. Kafka would create a database-and-broker dual-write problem. A future Kafka integration would use a transactional outbox for downstream events.
 
 ### Why a modular monolith?
 
-The API, worker and scheduler run as separate processes, but share domain packages and one PostgreSQL database.
-
-This provides independent execution and horizontal worker scaling without introducing premature service-to-service communication and deployment complexity.
+The API, worker and scheduler are independently executable processes but share domain packages and one database. This preserves simple transactions and deployment while allowing horizontal worker scaling.
 
 ### Why at-least-once rather than exactly-once?
 
-Workers may retry after crashes, timeouts or ambiguous provider responses.
+Exactly-once side effects cannot be guaranteed across independent systems without provider cooperation. The design uses at-least-once attempts, deterministic idempotency keys and provider-side deduplication.
 
-Exactly-once side effects cannot be guaranteed across independent systems without cooperation from the downstream provider.
+## Deployment
 
-The engine therefore uses:
+### Hosted demo
 
-```text
-at-least-once task attempts
-+
-deterministic idempotency keys
-+
-provider-side deduplication
+- UI: Vercel
+- API: Render
+- Database: Neon
+- Local observability: OpenTelemetry Collector, Jaeger, Prometheus and Grafana
+
+Frontend production variables:
+
+```env
+VITE_API_URL=https://clinical-results-api.onrender.com
+VITE_USE_MOCKS=false
 ```
 
-### Why version checks?
+Backend production variables:
 
-Acknowledgement and escalation may race.
+```env
+DATABASE_URL=<Neon pooled connection string>
+APP_ENVIRONMENT=production
+APP_VERSION=0.3.0
+FRONTEND_URL=https://YOUR-VERCEL-PROJECT.vercel.app
+OTEL_ENABLED=false
+```
 
-Both operations require the expected task status and version, and both increment the version. Only one transition can succeed against a given task version.
-
----
+Never expose `DATABASE_URL` through a `VITE_*` variable.
 
 ## Limitations
 
 This project intentionally does not include:
 
-- real patient data;
-- real clinical thresholds;
-- production authentication;
-- real NHS or hospital-system integration;
+- real patient data or real clinical thresholds;
+- production authentication or authorisation;
+- NHS or hospital-system integration;
 - regulatory compliance;
-- mobile push infrastructure;
-- production-grade secrets management;
+- real mobile push infrastructure;
+- production-grade secrets rotation;
 - multi-region deployment.
 
-The clinical rules, teams and deadlines are fictional development examples.
-
----
-
-## Possible extensions
-
-- clinician task-inbox UI;
-- authentication and role-based access;
-- configurable versioned classification rules;
-- configurable escalation policies;
-- Kubernetes deployment and pod-failure recovery demonstration;
-- Kafka integration using a transactional outbox;
-- FHIR-inspired synthetic adapters;
-- manual-intervention queue for failed tasks;
-- trace-context propagation through PostgreSQL;
-- queue-depth and overdue-task alerts.
-
----
-
-## Interview discussion points
-
-This project was designed to support discussion of:
-
-- `FOR UPDATE SKIP LOCKED`;
-- renewable leases;
-- stale-worker protection;
-- idempotent external effects;
-- acknowledgement and escalation races;
-- optimistic concurrency;
-- transactional audit trails;
-- modular monolith versus microservices;
-- PostgreSQL queue versus Redis or Kafka;
-- metrics cardinality;
-- failure injection and recovery testing.
-
----
 
 ## Licence
 
-This project is intended for educational and portfolio use.
+Educational and portfolio use.

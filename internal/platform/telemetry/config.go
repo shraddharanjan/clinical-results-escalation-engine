@@ -12,6 +12,7 @@ type Config struct {
 	Environment    string
 	OTLPEndpoint   string
 	Insecure       bool
+	Enabled        bool
 }
 
 func ConfigFromEnvironment(
@@ -23,17 +24,38 @@ func ConfigFromEnvironment(
 		)
 	}
 
-	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
-	if endpoint == "" {
+	enabled := true
+
+	if value := os.Getenv("OTEL_ENABLED"); value != "" {
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return Config{}, fmt.Errorf(
+				"parse OTEL_ENABLED: %w",
+				err,
+			)
+		}
+
+		enabled = parsed
+	}
+
+	endpoint := os.Getenv(
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+	)
+
+	if endpoint == "" && enabled {
 		endpoint = "localhost:4317"
 	}
 
-	environment := os.Getenv("APP_ENVIRONMENT")
+	environment := os.Getenv(
+		"APP_ENVIRONMENT",
+	)
+
 	if environment == "" {
 		environment = "development"
 	}
 
 	version := os.Getenv("APP_VERSION")
+
 	if version == "" {
 		version = "development"
 	}
@@ -60,5 +82,6 @@ func ConfigFromEnvironment(
 		Environment:    environment,
 		OTLPEndpoint:   endpoint,
 		Insecure:       insecure,
+		Enabled:        enabled,
 	}, nil
 }
