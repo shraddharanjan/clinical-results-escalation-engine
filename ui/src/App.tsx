@@ -17,15 +17,34 @@ import {
   Stethoscope,
   X,
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import {
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 
-type Severity = "critical" | "urgent" | "routine";
+import {
+  acknowledgeTask,
+  createResult,
+  getResults,
+  getTasks,
+  type ApiResult,
+  type ApiTask,
+} from "./api";
+
+type Severity =
+  | "critical"
+  | "urgent"
+  | "routine";
 
 type TaskStatus =
   | "pending"
   | "processing"
   | "awaiting_ack"
   | "acknowledged"
+  | "completed"
   | "escalated"
   | "failed";
 
@@ -96,202 +115,13 @@ interface SubmitResultForm {
   sourceResultId: string;
 }
 
-const initialTimestamp = Date.now();
-
-const initialResults: ClinicalResult[] = [
-  {
-    id: "result-a1f4c2d8",
-    patientReference: "P-1042",
-    test: "serum_potassium",
-    value: 6.8,
-    unit: "mmol/L",
-    severity: "critical",
-    sourceSystem: "laboratory-simulator",
-    sourceResultId: "LIMS-839211",
-    reportedAt: new Date(initialTimestamp - 8 * 60_000).toISOString(),
-    receivedAt: new Date(initialTimestamp - 7.8 * 60_000).toISOString(),
-    matchedRule: "potassium >= 6.5 mmol/L",
-  },
-  {
-    id: "result-b7e9d102",
-    patientReference: "P-1021",
-    test: "troponin_t",
-    value: 82,
-    unit: "ng/L",
-    severity: "critical",
-    sourceSystem: "laboratory-simulator",
-    sourceResultId: "LIMS-839212",
-    reportedAt: new Date(initialTimestamp - 7 * 60_000).toISOString(),
-    receivedAt: new Date(initialTimestamp - 6.8 * 60_000).toISOString(),
-    matchedRule: "troponin_t >= 52 ng/L",
-  },
-  {
-    id: "result-c3f6b9a1",
-    patientReference: "P-1055",
-    test: "haemoglobin",
-    value: 74,
-    unit: "g/L",
-    severity: "urgent",
-    sourceSystem: "laboratory-simulator",
-    sourceResultId: "LIMS-839213",
-    reportedAt: new Date(initialTimestamp - 5 * 60_000).toISOString(),
-    receivedAt: new Date(initialTimestamp - 4.8 * 60_000).toISOString(),
-    matchedRule: "haemoglobin < 80 g/L",
-  },
-  {
-    id: "result-d91e7a44",
-    patientReference: "P-1008",
-    test: "white_blood_cell_count",
-    value: 15.2,
-    unit: "10⁹/L",
-    severity: "routine",
-    sourceSystem: "laboratory-simulator",
-    sourceResultId: "LIMS-839214",
-    reportedAt: new Date(initialTimestamp - 4 * 60_000).toISOString(),
-    receivedAt: new Date(initialTimestamp - 3.8 * 60_000).toISOString(),
-    matchedRule: "default routine classification",
-  },
-  {
-    id: "result-e5b2d7c9",
-    patientReference: "P-1077",
-    test: "c_reactive_protein",
-    value: 198,
-    unit: "mg/L",
-    severity: "urgent",
-    sourceSystem: "laboratory-simulator",
-    sourceResultId: "LIMS-839215",
-    reportedAt: new Date(initialTimestamp - 18 * 60_000).toISOString(),
-    receivedAt: new Date(initialTimestamp - 17.8 * 60_000).toISOString(),
-    matchedRule: "c_reactive_protein >= 150 mg/L",
-  },
-];
-
-const initialTasks: ClinicalTask[] = [
-  {
-    id: "a1f4c2d8",
-    resultId: "result-a1f4c2d8",
-    patientReference: "P-1042",
-    test: "serum_potassium",
-    value: 6.8,
-    unit: "mmol/L",
-    severity: "critical",
-    status: "awaiting_ack",
-    assignedTeam: "acute-medicine",
-    dueAt: new Date(initialTimestamp + 151_000).toISOString(),
-    escalationLevel: 0,
-    version: 3,
-    reportedAt: new Date(initialTimestamp - 8 * 60_000).toISOString(),
-  },
-  {
-    id: "b7e9d102",
-    resultId: "result-b7e9d102",
-    patientReference: "P-1021",
-    test: "troponin_t",
-    value: 82,
-    unit: "ng/L",
-    severity: "critical",
-    status: "awaiting_ack",
-    assignedTeam: "cardiology",
-    dueAt: new Date(initialTimestamp + 372_000).toISOString(),
-    escalationLevel: 0,
-    version: 3,
-    reportedAt: new Date(initialTimestamp - 7 * 60_000).toISOString(),
-  },
-  {
-    id: "c3f6b9a1",
-    resultId: "result-c3f6b9a1",
-    patientReference: "P-1055",
-    test: "haemoglobin",
-    value: 74,
-    unit: "g/L",
-    severity: "urgent",
-    status: "processing",
-    assignedTeam: "lab-review-team",
-    escalationLevel: 0,
-    version: 2,
-    reportedAt: new Date(initialTimestamp - 5 * 60_000).toISOString(),
-  },
-  {
-    id: "d91e7a44",
-    resultId: "result-d91e7a44",
-    patientReference: "P-1008",
-    test: "white_blood_cell_count",
-    value: 15.2,
-    unit: "10⁹/L",
-    severity: "routine",
-    status: "pending",
-    assignedTeam: "pathology",
-    escalationLevel: 0,
-    version: 1,
-    reportedAt: new Date(initialTimestamp - 4 * 60_000).toISOString(),
-  },
-  {
-    id: "e5b2d7c9",
-    resultId: "result-e5b2d7c9",
-    patientReference: "P-1077",
-    test: "c_reactive_protein",
-    value: 198,
-    unit: "mg/L",
-    severity: "urgent",
-    status: "escalated",
-    assignedTeam: "medical-registrar",
-    dueAt: new Date(initialTimestamp + 525_000).toISOString(),
-    escalationLevel: 1,
-    version: 5,
-    reportedAt: new Date(initialTimestamp - 18 * 60_000).toISOString(),
-  },
-];
-
-const initialEvents: AuditEvent[] = [
-  {
-    id: "event-1",
-    taskId: "e5b2d7c9",
-    resultId: "result-e5b2d7c9",
-    type: "task_escalated",
-    description:
-      "Task escalated to level 1 and assigned to the medical registrar.",
-    timestamp: new Date(initialTimestamp - 80_000).toISOString(),
-  },
-  {
-    id: "event-2",
-    taskId: "8d71c3e4",
-    type: "task_acknowledged",
-    description: "Acknowledgement received from clinician-12.",
-    timestamp: new Date(initialTimestamp - 101_000).toISOString(),
-  },
-  {
-    id: "event-3",
-    taskId: "b7e9d102",
-    resultId: "result-b7e9d102",
-    type: "notification_delivered",
-    description: "Push notification delivered to cardiology.",
-    timestamp: new Date(initialTimestamp - 107_000).toISOString(),
-  },
-  {
-    id: "event-4",
-    taskId: "a1f4c2d8",
-    resultId: "result-a1f4c2d8",
-    type: "task_created",
-    description:
-      "Critical serum potassium result created a clinical review task.",
-    timestamp: new Date(initialTimestamp - 130_000).toISOString(),
-  },
-  {
-    id: "event-5",
-    taskId: "6c2a1f98",
-    type: "acknowledgement_deadline_missed",
-    description: "The acknowledgement deadline was missed.",
-    timestamp: new Date(initialTimestamp - 197_000).toISOString(),
-  },
-];
-
 const initialSubmitForm: SubmitResultForm = {
-  patientReference: "P-2048",
+  patientReference: "P-DEMO-2048",
   test: "serum_potassium",
   value: "6.8",
   unit: "mmol/L",
   sourceSystem: "laboratory-simulator",
-  sourceResultId: "LIMS-DEMO-001",
+  sourceResultId: `LIMS-DEMO-${Date.now()}`,
 };
 
 const navigationGroups = [
@@ -358,92 +188,120 @@ const activityIcons = {
   task_created: FilePlus2,
   notification_delivered: BellRing,
   task_acknowledged: CheckCircle2,
-  acknowledgement_deadline_missed: Clock3,
+  acknowledgement_deadline_missed:
+    Clock3,
   task_escalated: CircleAlert,
 };
 
-function formatLabel(value: string): string {
+function formatLabel(
+  value: string,
+): string {
   return value.replaceAll("_", " ");
 }
 
-function createShortId(): string {
-  return crypto.randomUUID().replaceAll("-", "").slice(0, 8);
-}
-
-function classifyResult(test: string, value: number): {
-  severity: Severity;
-  rule: string;
-  assignedTeam: string;
-  deadlineMinutes: number;
-} {
-  if (test === "serum_potassium" && value >= 6.5) {
-    return {
-      severity: "critical",
-      rule: "potassium >= 6.5 mmol/L",
-      assignedTeam: "acute-medicine",
-      deadlineMinutes: 5,
-    };
-  }
-
-  if (test === "serum_potassium" && value >= 6.0) {
-    return {
-      severity: "urgent",
-      rule: "potassium >= 6.0 mmol/L",
-      assignedTeam: "acute-medicine",
-      deadlineMinutes: 15,
-    };
-  }
-
-  if (test === "troponin_t" && value >= 52) {
-    return {
-      severity: "critical",
-      rule: "troponin_t >= 52 ng/L",
-      assignedTeam: "cardiology",
-      deadlineMinutes: 5,
-    };
-  }
-
-  if (test === "haemoglobin" && value < 80) {
-    return {
-      severity: "urgent",
-      rule: "haemoglobin < 80 g/L",
-      assignedTeam: "lab-review-team",
-      deadlineMinutes: 15,
-    };
-  }
-
-  if (test === "c_reactive_protein" && value >= 150) {
-    return {
-      severity: "urgent",
-      rule: "c_reactive_protein >= 150 mg/L",
-      assignedTeam: "acute-medicine",
-      deadlineMinutes: 15,
-    };
-  }
-
+function mapApiResult(
+  result: ApiResult,
+): ClinicalResult {
   return {
-    severity: "routine",
-    rule: "default routine classification",
-    assignedTeam: "pathology",
-    deadlineMinutes: 60,
+    id: result.id,
+    patientReference:
+      result.patient_reference,
+    test: result.test_code,
+    value: result.value,
+    unit: result.unit,
+    severity: result.severity,
+    sourceSystem: result.source_system,
+    sourceResultId:
+      result.source_result_id,
+    reportedAt: result.reported_at,
+    receivedAt: result.received_at,
+    matchedRule:
+      result.matched_rule ??
+      "No matched rule returned",
   };
 }
 
-function dueLabel(dueAt: string | undefined, currentTime: number): string {
+function mapApiTask(
+  task: ApiTask,
+  resultById: Map<
+    string,
+    ClinicalResult
+  >,
+): ClinicalTask {
+  const linkedResult =
+    resultById.get(task.result_id);
+
+  return {
+    id: task.id,
+    resultId: task.result_id,
+
+    patientReference:
+      task.patient_reference ??
+      linkedResult?.patientReference ??
+      "Unknown",
+
+    test:
+      task.test_code ??
+      linkedResult?.test ??
+      "clinical_result",
+
+    value:
+      task.value ??
+      linkedResult?.value ??
+      0,
+
+    unit:
+      task.unit ??
+      linkedResult?.unit ??
+      "",
+
+    severity: task.severity,
+    status: task.status,
+    assignedTeam: task.assigned_team,
+
+    dueAt:
+      task.acknowledgement_due_at ??
+      undefined,
+
+    escalationLevel:
+      task.escalation_level,
+
+    version: task.version,
+
+    reportedAt:
+      task.reported_at ??
+      linkedResult?.reportedAt ??
+      task.created_at,
+  };
+}
+
+function dueLabel(
+  dueAt: string | undefined,
+  currentTime: number,
+): string {
   if (!dueAt) {
     return "—";
   }
 
-  const milliseconds = new Date(dueAt).getTime() - currentTime;
+  const milliseconds =
+    new Date(dueAt).getTime() -
+    currentTime;
 
   if (milliseconds <= 0) {
     return "Overdue";
   }
 
-  const minutes = Math.floor(milliseconds / 60_000);
-  const seconds = Math.floor((milliseconds % 60_000) / 1000);
+  const minutes = Math.floor(
+    milliseconds / 60_000,
+  );
 
-  return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  const seconds = Math.floor(
+    (milliseconds % 60_000) / 1000,
+  );
+
+  return `${minutes}m ${String(
+    seconds,
+  ).padStart(2, "0")}s`;
 }
 
 interface SidebarProps {
@@ -470,47 +328,75 @@ function Sidebar({
       </div>
 
       <nav>
-        {navigationGroups.map((group) => (
-          <div className="nav-group" key={group.label}>
-            <div className="nav-label">{group.label}</div>
+        {navigationGroups.map(
+          (group) => (
+            <div
+              className="nav-group"
+              key={group.label}
+            >
+              <div className="nav-label">
+                {group.label}
+              </div>
 
-            {group.items.map((item) => {
-              const Icon = item.icon;
-              const isActive = activePage === item.id;
+              {group.items.map((item) => {
+                const Icon = item.icon;
+                const isActive =
+                  activePage === item.id;
 
-              let badge: number | null = null;
+                let badge: number | null =
+                  null;
 
-              if (item.id === "tasks") {
-                badge = taskCount;
-              }
+                if (item.id === "tasks") {
+                  badge = taskCount;
+                }
 
-              if (item.id === "escalations") {
-                badge = escalationCount;
-              }
+                if (
+                  item.id ===
+                  "escalations"
+                ) {
+                  badge =
+                    escalationCount;
+                }
 
-              return (
-                <button
-                  className={`nav-item ${isActive ? "active" : ""}`}
-                  key={item.id}
-                  type="button"
-                  onClick={() => onPageChange(item.id)}
-                >
-                  <Icon size={17} />
-                  <span>{item.label}</span>
+                return (
+                  <button
+                    className={`nav-item ${
+                      isActive
+                        ? "active"
+                        : ""
+                    }`}
+                    key={item.id}
+                    type="button"
+                    onClick={() =>
+                      onPageChange(item.id)
+                    }
+                  >
+                    <Icon size={17} />
+                    <span>
+                      {item.label}
+                    </span>
 
-                  {badge !== null && badge > 0 ? (
-                    <span className="nav-badge">{badge}</span>
-                  ) : null}
-                </button>
-              );
-            })}
-          </div>
-        ))}
+                    {badge !== null &&
+                    badge > 0 ? (
+                      <span className="nav-badge">
+                        {badge}
+                      </span>
+                    ) : null}
+                  </button>
+                );
+              })}
+            </div>
+          ),
+        )}
       </nav>
 
       <div className="sidebar-footer">
-        <span>Clinical Escalation Engine</span>
-        <small>v0.2.0 · synthetic demonstration</small>
+        <span>
+          Clinical Escalation Engine
+        </span>
+        <small>
+          Live Go API demonstration
+        </small>
       </div>
     </aside>
   );
@@ -519,7 +405,12 @@ function Sidebar({
 interface MetricCardProps {
   title: string;
   value: string;
-  tone: "blue" | "purple" | "red" | "amber" | "green";
+  tone:
+    | "blue"
+    | "purple"
+    | "red"
+    | "amber"
+    | "green";
   caption: string;
 }
 
@@ -530,12 +421,26 @@ function MetricCard({
   caption,
 }: MetricCardProps) {
   return (
-    <article className={`metric-card tone-${tone}`}>
-      <div className="metric-title">{title}</div>
-      <div className="metric-value">{value}</div>
-      <div className="metric-caption">{caption}</div>
+    <article
+      className={`metric-card tone-${tone}`}
+    >
+      <div className="metric-title">
+        {title}
+      </div>
 
-      <svg className="sparkline" viewBox="0 0 200 50" aria-hidden="true">
+      <div className="metric-value">
+        {value}
+      </div>
+
+      <div className="metric-caption">
+        {caption}
+      </div>
+
+      <svg
+        className="sparkline"
+        viewBox="0 0 200 50"
+        aria-hidden="true"
+      >
         <polyline
           fill="none"
           points="0,38 14,25 27,34 43,19 58,31 72,23 86,29 103,15 117,24 132,19 146,22 161,12 176,17 200,6"
@@ -550,13 +455,29 @@ function MetricCard({
 interface TaskTableProps {
   tasks: ClinicalTask[];
   currentTime: number;
-  severityFilter: "all" | Severity;
-  statusFilter: "all" | TaskStatus;
+  severityFilter:
+    | "all"
+    | Severity;
+  statusFilter:
+    | "all"
+    | TaskStatus;
   query: string;
-  onSeverityChange: (value: "all" | Severity) => void;
-  onStatusChange: (value: "all" | TaskStatus) => void;
-  onQueryChange: (value: string) => void;
-  onSelect: (task: ClinicalTask) => void;
+
+  onSeverityChange: (
+    value: "all" | Severity,
+  ) => void;
+
+  onStatusChange: (
+    value: "all" | TaskStatus,
+  ) => void;
+
+  onQueryChange: (
+    value: string,
+  ) => void;
+
+  onSelect: (
+    task: ClinicalTask,
+  ) => void;
 }
 
 function TaskTable({
@@ -575,34 +496,77 @@ function TaskTable({
       <div className="panel-heading task-toolbar">
         <div>
           <h2>Clinical tasks</h2>
-          <p>Tasks currently moving through the clinical workflow.</p>
+          <p>
+            Tasks loaded from the Go API and
+            PostgreSQL.
+          </p>
         </div>
 
         <div className="filters">
           <select
             value={severityFilter}
             onChange={(event) =>
-              onSeverityChange(event.target.value as "all" | Severity)
+              onSeverityChange(
+                event.target.value as
+                  | "all"
+                  | Severity,
+              )
             }
           >
-            <option value="all">All severities</option>
-            <option value="critical">Critical</option>
-            <option value="urgent">Urgent</option>
-            <option value="routine">Routine</option>
+            <option value="all">
+              All severities
+            </option>
+
+            <option value="critical">
+              Critical
+            </option>
+
+            <option value="urgent">
+              Urgent
+            </option>
+
+            <option value="routine">
+              Routine
+            </option>
           </select>
 
           <select
             value={statusFilter}
             onChange={(event) =>
-              onStatusChange(event.target.value as "all" | TaskStatus)
+              onStatusChange(
+                event.target.value as
+                  | "all"
+                  | TaskStatus,
+              )
             }
           >
-            <option value="all">All statuses</option>
-            <option value="awaiting_ack">Awaiting acknowledgement</option>
-            <option value="processing">Processing</option>
-            <option value="pending">Pending</option>
-            <option value="escalated">Escalated</option>
-            <option value="acknowledged">Acknowledged</option>
+            <option value="all">
+              All statuses
+            </option>
+
+            <option value="awaiting_ack">
+              Awaiting acknowledgement
+            </option>
+
+            <option value="processing">
+              Processing
+            </option>
+
+            <option value="pending">
+              Pending
+            </option>
+
+            <option value="escalated">
+              Escalated
+            </option>
+
+            <option value="acknowledged">
+              Acknowledged
+            </option>
+
+            <option value="failed">
+              Failed
+            </option>
           </select>
 
           <label className="search-input">
@@ -610,7 +574,11 @@ function TaskTable({
 
             <input
               value={query}
-              onChange={(event) => onQueryChange(event.target.value)}
+              onChange={(event) =>
+                onQueryChange(
+                  event.target.value,
+                )
+              }
               placeholder="Search tasks"
             />
           </label>
@@ -635,44 +603,76 @@ function TaskTable({
           <tbody>
             {tasks.map((task) => (
               <tr key={task.id}>
-                <td className="mono">{task.id}</td>
-                <td>{task.patientReference}</td>
+                <td className="mono">
+                  {task.id.slice(0, 8)}
+                </td>
 
                 <td>
-                  <strong>{formatLabel(task.test)}</strong>
+                  {
+                    task.patientReference
+                  }
+                </td>
+
+                <td>
+                  <strong>
+                    {formatLabel(
+                      task.test,
+                    )}
+                  </strong>
 
                   <span className="result-value">
-                    {task.value} {task.unit}
+                    {task.value}{" "}
+                    {task.unit}
                   </span>
                 </td>
 
                 <td>
-                  <span className={`badge severity ${task.severity}`}>
+                  <span
+                    className={`badge severity ${task.severity}`}
+                  >
                     {task.severity}
                   </span>
                 </td>
 
                 <td>
-                  <span className={`badge status ${task.status}`}>
-                    {formatLabel(task.status)}
+                  <span
+                    className={`badge status ${task.status}`}
+                  >
+                    {formatLabel(
+                      task.status,
+                    )}
 
-                    {task.escalationLevel > 0
+                    {task.escalationLevel >
+                    0
                       ? ` · L${task.escalationLevel}`
                       : ""}
                   </span>
                 </td>
 
-                <td>{task.assignedTeam}</td>
+                <td>
+                  {task.assignedTeam}
+                </td>
 
-                <td className={task.dueAt ? "due" : ""}>
-                  {dueLabel(task.dueAt, currentTime)}
+                <td
+                  className={
+                    task.dueAt
+                      ? "due"
+                      : ""
+                  }
+                >
+                  {dueLabel(
+                    task.dueAt,
+                    currentTime,
+                  )}
                 </td>
 
                 <td>
                   <button
                     className="ghost-button"
                     type="button"
-                    onClick={() => onSelect(task)}
+                    onClick={() =>
+                      onSelect(task)
+                    }
                   >
                     View
                   </button>
@@ -684,7 +684,8 @@ function TaskTable({
 
         {tasks.length === 0 ? (
           <div className="empty-state">
-            No tasks match the selected filters.
+            No tasks match the selected
+            filters.
           </div>
         ) : null}
       </div>
@@ -692,13 +693,20 @@ function TaskTable({
   );
 }
 
-function ResultsTable({ results }: { results: ClinicalResult[] }) {
+function ResultsTable({
+  results,
+}: {
+  results: ClinicalResult[];
+}) {
   return (
     <section className="panel">
       <div className="panel-heading">
         <div>
           <h2>Clinical results</h2>
-          <p>Results received and classified by the workflow engine.</p>
+
+          <p>
+            Results returned by the Go API.
+          </p>
         </div>
       </div>
 
@@ -718,32 +726,74 @@ function ResultsTable({ results }: { results: ClinicalResult[] }) {
           </thead>
 
           <tbody>
-            {results.map((result) => (
-              <tr key={result.id}>
-                <td className="mono">{result.id.replace("result-", "")}</td>
-                <td>{result.patientReference}</td>
-                <td>{formatLabel(result.test)}</td>
-                <td>
-                  <strong>
-                    {result.value} {result.unit}
-                  </strong>
-                </td>
-                <td>
-                  <span className={`badge severity ${result.severity}`}>
-                    {result.severity}
-                  </span>
-                </td>
-                <td>{result.matchedRule}</td>
-                <td>{result.sourceSystem}</td>
-                <td>
-                  {new Date(result.receivedAt).toLocaleTimeString([], {
-                    hour: "2-digit",
-                    minute: "2-digit",
-                    second: "2-digit",
-                  })}
-                </td>
-              </tr>
-            ))}
+            {results.map(
+              (result) => (
+                <tr key={result.id}>
+                  <td className="mono">
+                    {result.id.slice(
+                      0,
+                      8,
+                    )}
+                  </td>
+
+                  <td>
+                    {
+                      result.patientReference
+                    }
+                  </td>
+
+                  <td>
+                    {formatLabel(
+                      result.test,
+                    )}
+                  </td>
+
+                  <td>
+                    <strong>
+                      {result.value}{" "}
+                      {result.unit}
+                    </strong>
+                  </td>
+
+                  <td>
+                    <span
+                      className={`badge severity ${result.severity}`}
+                    >
+                      {
+                        result.severity
+                      }
+                    </span>
+                  </td>
+
+                  <td>
+                    {
+                      result.matchedRule
+                    }
+                  </td>
+
+                  <td>
+                    {
+                      result.sourceSystem
+                    }
+                  </td>
+
+                  <td>
+                    {new Date(
+                      result.receivedAt,
+                    ).toLocaleTimeString(
+                      [],
+                      {
+                        hour: "2-digit",
+                        minute:
+                          "2-digit",
+                        second:
+                          "2-digit",
+                      },
+                    )}
+                  </td>
+                </tr>
+              ),
+            )}
           </tbody>
         </table>
       </div>
@@ -751,19 +801,28 @@ function ResultsTable({ results }: { results: ClinicalResult[] }) {
   );
 }
 
-function ActivityFeed({ events }: { events: AuditEvent[] }) {
+function ActivityFeed({
+  events,
+}: {
+  events: AuditEvent[];
+}) {
   return (
     <section className="panel activity-panel">
       <div className="panel-heading">
         <div>
           <h2>Recent activity</h2>
-          <p>Latest audit events from the workflow engine.</p>
+
+          <p>
+            Local UI activity for the
+            current session.
+          </p>
         </div>
       </div>
 
       <div className="activity-list">
         {events.map((event) => {
-          const Icon = activityIcons[event.type];
+          const Icon =
+            activityIcons[event.type];
 
           return (
             <article
@@ -775,20 +834,39 @@ function ActivityFeed({ events }: { events: AuditEvent[] }) {
               </span>
 
               <div>
-                <strong>{formatLabel(event.type)}</strong>
-                <p>{event.description}</p>
+                <strong>
+                  {formatLabel(
+                    event.type,
+                  )}
+                </strong>
+
+                <p>
+                  {event.description}
+                </p>
               </div>
 
               <time>
-                {new Date(event.timestamp).toLocaleTimeString([], {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                  second: "2-digit",
-                })}
+                {new Date(
+                  event.timestamp,
+                ).toLocaleTimeString(
+                  [],
+                  {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                    second: "2-digit",
+                  },
+                )}
               </time>
             </article>
           );
         })}
+
+        {events.length === 0 ? (
+          <div className="empty-state">
+            Submit or acknowledge a task
+            to generate activity.
+          </div>
+        ) : null}
       </div>
     </section>
   );
@@ -799,7 +877,9 @@ interface TaskDrawerProps {
   busy: boolean;
   error: string | null;
   onClose: () => void;
-  onAcknowledge: (task: ClinicalTask) => void;
+  onAcknowledge: (
+    task: ClinicalTask,
+  ) => void;
 }
 
 function TaskDrawer({
@@ -821,7 +901,9 @@ function TaskDrawer({
     >
       <aside
         className="drawer"
-        onMouseDown={(event) => event.stopPropagation()}
+        onMouseDown={(event) =>
+          event.stopPropagation()
+        }
       >
         <button
           className="drawer-close"
@@ -832,32 +914,48 @@ function TaskDrawer({
           <X size={19} />
         </button>
 
-        <div className="drawer-kicker">{task.patientReference}</div>
-        <h2>{formatLabel(task.test)}</h2>
+        <div className="drawer-kicker">
+          {task.patientReference}
+        </div>
+
+        <h2>
+          {formatLabel(task.test)}
+        </h2>
 
         <div className="drawer-result">
-          {task.value} <span>{task.unit}</span>
+          {task.value}{" "}
+          <span>{task.unit}</span>
         </div>
 
         <div className="drawer-badges">
-          <span className={`badge severity ${task.severity}`}>
+          <span
+            className={`badge severity ${task.severity}`}
+          >
             {task.severity}
           </span>
 
-          <span className={`badge status ${task.status}`}>
-            {formatLabel(task.status)}
+          <span
+            className={`badge status ${task.status}`}
+          >
+            {formatLabel(
+              task.status,
+            )}
           </span>
         </div>
 
         <dl className="details-grid">
           <div>
             <dt>Assigned team</dt>
-            <dd>{task.assignedTeam}</dd>
+            <dd>
+              {task.assignedTeam}
+            </dd>
           </div>
 
           <div>
             <dt>Escalation level</dt>
-            <dd>{task.escalationLevel}</dd>
+            <dd>
+              {task.escalationLevel}
+            </dd>
           </div>
 
           <div>
@@ -867,7 +965,11 @@ function TaskDrawer({
 
           <div>
             <dt>Reported</dt>
-            <dd>{new Date(task.reportedAt).toLocaleString()}</dd>
+            <dd>
+              {new Date(
+                task.reportedAt,
+              ).toLocaleString()}
+            </dd>
           </div>
         </dl>
 
@@ -875,34 +977,51 @@ function TaskDrawer({
           <Clock3 size={18} />
 
           <div>
-            <span>Acknowledgement deadline</span>
+            <span>
+              Acknowledgement deadline
+            </span>
 
             <strong>
               {task.dueAt
-                ? new Date(task.dueAt).toLocaleTimeString()
+                ? new Date(
+                    task.dueAt,
+                  ).toLocaleTimeString()
                 : "Not set"}
             </strong>
           </div>
         </div>
 
         <div className="drawer-note">
-          Synthetic demonstration only. This interface is not a clinical
-          device and must not be used with real patient data.
+          Synthetic demonstration only.
+          This interface is not a
+          clinical device and must not be
+          used with real patient data.
         </div>
 
-        {error ? <div className="error-banner">{error}</div> : null}
+        {error ? (
+          <div className="error-banner">
+            {error}
+          </div>
+        ) : null}
 
         <button
           className="primary-button"
-          disabled={busy || task.status !== "awaiting_ack"}
-          onClick={() => onAcknowledge(task)}
+          disabled={
+            busy ||
+            task.status !==
+              "awaiting_ack"
+          }
+          onClick={() =>
+            onAcknowledge(task)
+          }
           type="button"
         >
           <CheckCircle2 size={18} />
 
           {busy
             ? "Acknowledging…"
-            : task.status === "acknowledged"
+            : task.status ===
+                "acknowledged"
               ? "Task acknowledged"
               : "Acknowledge task"}
         </button>
@@ -915,50 +1034,73 @@ interface SubmitResultPageProps {
   form: SubmitResultForm;
   submitting: boolean;
   successMessage: string | null;
-  onFormChange: (field: keyof SubmitResultForm, value: string) => void;
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  errorMessage: string | null;
+
+  onFormChange: (
+    field: keyof SubmitResultForm,
+    value: string,
+  ) => void;
+
+  onSubmit: (
+    event: FormEvent<HTMLFormElement>,
+  ) => void;
 }
 
 function SubmitResultPage({
   form,
   submitting,
   successMessage,
+  errorMessage,
   onFormChange,
   onSubmit,
 }: SubmitResultPageProps) {
-  const preview = classifyResult(form.test, Number(form.value || 0));
-
   return (
     <>
       <section className="page-heading">
         <div>
-          <h1>Submit clinical result</h1>
+          <h1>
+            Submit clinical result
+          </h1>
 
           <p>
-            Create a synthetic result and demonstrate classification,
-            task creation and acknowledgement.
+            Send a synthetic result to
+            the live Go API.
           </p>
         </div>
       </section>
 
       <section className="form-layout">
-        <form className="panel result-form" onSubmit={onSubmit}>
+        <form
+          className="panel result-form"
+          onSubmit={onSubmit}
+        >
           <div className="panel-heading">
             <div>
               <h2>Result details</h2>
-              <p>All data entered here is synthetic demonstration data.</p>
+
+              <p>
+                Use synthetic patient
+                references only.
+              </p>
             </div>
           </div>
 
           <div className="form-body">
             <label>
-              <span>Patient reference</span>
+              <span>
+                Patient reference
+              </span>
 
               <input
                 required
-                value={form.patientReference}
+                value={
+                  form.patientReference
+                }
                 onChange={(event) =>
-                  onFormChange("patientReference", event.target.value)
+                  onFormChange(
+                    "patientReference",
+                    event.target.value,
+                  )
                 }
               />
             </label>
@@ -969,15 +1111,28 @@ function SubmitResultPage({
               <select
                 value={form.test}
                 onChange={(event) =>
-                  onFormChange("test", event.target.value)
+                  onFormChange(
+                    "test",
+                    event.target.value,
+                  )
                 }
               >
-                <option value="serum_potassium">Serum potassium</option>
-                <option value="troponin_t">Troponin T</option>
-                <option value="haemoglobin">Haemoglobin</option>
+                <option value="serum_potassium">
+                  Serum potassium
+                </option>
+
+                <option value="troponin_t">
+                  Troponin T
+                </option>
+
+                <option value="haemoglobin">
+                  Haemoglobin
+                </option>
+
                 <option value="c_reactive_protein">
                   C-reactive protein
                 </option>
+
                 <option value="white_blood_cell_count">
                   White blood cell count
                 </option>
@@ -994,7 +1149,10 @@ function SubmitResultPage({
                   step="0.1"
                   value={form.value}
                   onChange={(event) =>
-                    onFormChange("value", event.target.value)
+                    onFormChange(
+                      "value",
+                      event.target.value,
+                    )
                   }
                 />
               </label>
@@ -1006,7 +1164,10 @@ function SubmitResultPage({
                   required
                   value={form.unit}
                   onChange={(event) =>
-                    onFormChange("unit", event.target.value)
+                    onFormChange(
+                      "unit",
+                      event.target.value,
+                    )
                   }
                 />
               </label>
@@ -1017,29 +1178,49 @@ function SubmitResultPage({
 
               <input
                 required
-                value={form.sourceSystem}
+                value={
+                  form.sourceSystem
+                }
                 onChange={(event) =>
-                  onFormChange("sourceSystem", event.target.value)
+                  onFormChange(
+                    "sourceSystem",
+                    event.target.value,
+                  )
                 }
               />
             </label>
 
             <label>
-              <span>Source result ID</span>
+              <span>
+                Source result ID
+              </span>
 
               <input
                 required
-                value={form.sourceResultId}
+                value={
+                  form.sourceResultId
+                }
                 onChange={(event) =>
-                  onFormChange("sourceResultId", event.target.value)
+                  onFormChange(
+                    "sourceResultId",
+                    event.target.value,
+                  )
                 }
               />
             </label>
 
             {successMessage ? (
               <div className="success-banner">
-                <CheckCircle2 size={18} />
+                <CheckCircle2
+                  size={18}
+                />
                 {successMessage}
+              </div>
+            ) : null}
+
+            {errorMessage ? (
+              <div className="error-banner">
+                {errorMessage}
               </div>
             ) : null}
 
@@ -1048,8 +1229,13 @@ function SubmitResultPage({
               disabled={submitting}
               type="submit"
             >
-              <Stethoscope size={18} />
-              {submitting ? "Creating workflow…" : "Submit result"}
+              <Stethoscope
+                size={18}
+              />
+
+              {submitting
+                ? "Submitting…"
+                : "Submit result"}
             </button>
           </div>
         </form>
@@ -1057,51 +1243,56 @@ function SubmitResultPage({
         <aside className="panel classification-preview">
           <div className="panel-heading">
             <div>
-              <h2>Classification preview</h2>
-              <p>How the demonstration rule engine will classify this result.</p>
+              <h2>Demo scenario</h2>
+
+              <p>
+                This pre-filled result
+                demonstrates the critical
+                potassium workflow.
+              </p>
             </div>
           </div>
 
           <div className="preview-body">
-            <span className={`preview-severity ${preview.severity}`}>
-              {preview.severity}
+            <span className="preview-severity critical">
+              Critical
             </span>
 
             <div className="preview-value">
-              {form.value || "0"} <small>{form.unit}</small>
+              {form.value || "0"}{" "}
+              <small>{form.unit}</small>
             </div>
 
             <dl className="preview-details">
               <div>
-                <dt>Matched rule</dt>
-                <dd>{preview.rule}</dd>
+                <dt>
+                  Expected matched rule
+                </dt>
+
+                <dd>
+                  potassium ≥ 6.5 mmol/L
+                </dd>
               </div>
 
               <div>
-                <dt>Assigned team</dt>
-                <dd>{preview.assignedTeam}</dd>
+                <dt>
+                  Expected assigned team
+                </dt>
+
+                <dd>acute-medicine</dd>
               </div>
 
               <div>
-                <dt>Acknowledgement deadline</dt>
-                <dd>{preview.deadlineMinutes} minutes</dd>
-              </div>
+                <dt>
+                  Expected workflow
+                </dt>
 
-              <div>
-                <dt>Initial task status</dt>
-                <dd>awaiting acknowledgement</dd>
+                <dd>
+                  result → task → worker →
+                  acknowledgement
+                </dd>
               </div>
             </dl>
-
-            <div className="workflow-preview">
-              <span>Result received</span>
-              <i />
-              <span>Classified</span>
-              <i />
-              <span>Task created</span>
-              <i />
-              <span>Notification delivered</span>
-            </div>
           </div>
         </aside>
       </section>
@@ -1127,136 +1318,308 @@ function PlaceholderPage({
         </div>
       </section>
 
-      <section className="panel placeholder-panel">{children}</section>
+      <section className="panel placeholder-panel">
+        {children}
+      </section>
     </>
   );
 }
 
 function App() {
-  const [activePage, setActivePage] = useState<Page>("dashboard");
-  const [tasks, setTasks] = useState<ClinicalTask[]>(initialTasks);
+  const [activePage, setActivePage] =
+    useState<Page>("dashboard");
+
+  const [tasks, setTasks] = useState<
+    ClinicalTask[]
+  >([]);
+
   const [results, setResults] =
-    useState<ClinicalResult[]>(initialResults);
-  const [events, setEvents] = useState<AuditEvent[]>(initialEvents);
+    useState<ClinicalResult[]>([]);
 
-  const [selectedTask, setSelectedTask] =
-    useState<ClinicalTask | null>(null);
+  const [events, setEvents] =
+    useState<AuditEvent[]>([]);
 
-  const [severityFilter, setSeverityFilter] =
-    useState<"all" | Severity>("all");
-
-  const [statusFilter, setStatusFilter] =
-    useState<"all" | TaskStatus>("all");
-
-  const [query, setQuery] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [drawerError, setDrawerError] = useState<string | null>(null);
-
-  const [currentTime, setCurrentTime] = useState(Date.now());
-
-  const [submitForm, setSubmitForm] =
-    useState<SubmitResultForm>(initialSubmitForm);
-
-  const [submittingResult, setSubmittingResult] = useState(false);
-  const [submitSuccess, setSubmitSuccess] = useState<string | null>(
+  const [
+    selectedTask,
+    setSelectedTask,
+  ] = useState<ClinicalTask | null>(
     null,
   );
 
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      setCurrentTime(Date.now());
-    }, 1000);
+  const [
+    severityFilter,
+    setSeverityFilter,
+  ] = useState<"all" | Severity>(
+    "all",
+  );
 
-    return () => window.clearInterval(timer);
-  }, []);
+  const [
+    statusFilter,
+    setStatusFilter,
+  ] = useState<
+    "all" | TaskStatus
+  >("all");
 
-  const filteredTasks = useMemo(() => {
-    const normalisedQuery = query.trim().toLowerCase();
+  const [query, setQuery] =
+    useState("");
 
-    return tasks.filter((task) => {
-      const severityMatches =
-        severityFilter === "all" || task.severity === severityFilter;
+  const [busy, setBusy] =
+    useState(false);
 
-      const statusMatches =
-        statusFilter === "all" || task.status === statusFilter;
+  const [
+    drawerError,
+    setDrawerError,
+  ] = useState<string | null>(null);
 
-      const searchMatches =
-        normalisedQuery.length === 0 ||
-        [
-          task.id,
-          task.patientReference,
-          task.test,
-          task.assignedTeam,
-          task.status,
-        ].some((value) =>
-          value.toLowerCase().includes(normalisedQuery),
+  const [
+    loadingData,
+    setLoadingData,
+  ] = useState(false);
+
+  const [
+    dataError,
+    setDataError,
+  ] = useState<string | null>(null);
+
+  const [
+    currentTime,
+    setCurrentTime,
+  ] = useState(Date.now());
+
+  const [
+    submitForm,
+    setSubmitForm,
+  ] = useState<SubmitResultForm>(
+    initialSubmitForm,
+  );
+
+  const [
+    submittingResult,
+    setSubmittingResult,
+  ] = useState(false);
+
+  const [
+    submitSuccess,
+    setSubmitSuccess,
+  ] = useState<string | null>(null);
+
+  const [
+    submitError,
+    setSubmitError,
+  ] = useState<string | null>(null);
+
+  const loadBackendData =
+    useCallback(async () => {
+      setLoadingData(true);
+      setDataError(null);
+
+      try {
+        const [
+          apiTasks,
+          apiResults,
+        ] = await Promise.all([
+          getTasks(),
+          getResults(),
+        ]);
+
+        const mappedResults =
+          apiResults.map(mapApiResult);
+
+        const resultById = new Map(
+          mappedResults.map((result) => [
+            result.id,
+            result,
+          ]),
         );
 
-      return severityMatches && statusMatches && searchMatches;
-    });
-  }, [tasks, severityFilter, statusFilter, query]);
+        const mappedTasks =
+          apiTasks.map((task) =>
+            mapApiTask(
+              task,
+              resultById,
+            ),
+          );
 
-  const awaitingAcknowledgementCount = tasks.filter(
-    (task) => task.status === "awaiting_ack",
-  ).length;
+        setResults(mappedResults);
+        setTasks(mappedTasks);
+
+        setSelectedTask(
+          (currentTask) => {
+            if (!currentTask) {
+              return null;
+            }
+
+            return (
+              mappedTasks.find(
+                (task) =>
+                  task.id ===
+                  currentTask.id,
+              ) ?? null
+            );
+          },
+        );
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Failed to load backend data.";
+
+        setDataError(message);
+
+        console.error(
+          "Failed to load backend data:",
+          error,
+        );
+      } finally {
+        setLoadingData(false);
+      }
+    }, []);
+
+  useEffect(() => {
+    const timer =
+      window.setInterval(() => {
+        setCurrentTime(Date.now());
+      }, 1000);
+
+    return () =>
+      window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    void loadBackendData();
+
+    const pollingInterval =
+      window.setInterval(() => {
+        void loadBackendData();
+      }, 5000);
+
+    return () =>
+      window.clearInterval(
+        pollingInterval,
+      );
+  }, [loadBackendData]);
+
+  const filteredTasks = useMemo(
+    () => {
+      const normalisedQuery =
+        query.trim().toLowerCase();
+
+      return tasks.filter((task) => {
+        const severityMatches =
+          severityFilter === "all" ||
+          task.severity ===
+            severityFilter;
+
+        const statusMatches =
+          statusFilter === "all" ||
+          task.status === statusFilter;
+
+        const searchMatches =
+          normalisedQuery.length === 0 ||
+          [
+            task.id,
+            task.patientReference,
+            task.test,
+            task.assignedTeam,
+            task.status,
+          ].some((value) =>
+            value
+              .toLowerCase()
+              .includes(
+                normalisedQuery,
+              ),
+          );
+
+        return (
+          severityMatches &&
+          statusMatches &&
+          searchMatches
+        );
+      });
+    },
+    [
+      tasks,
+      severityFilter,
+      statusFilter,
+      query,
+    ],
+  );
+
+  const awaitingAcknowledgementCount =
+    tasks.filter(
+      (task) =>
+        task.status ===
+        "awaiting_ack",
+    ).length;
 
   const overdueCount = tasks.filter(
     (task) =>
       task.dueAt !== undefined &&
-      new Date(task.dueAt).getTime() < currentTime &&
-      task.status === "awaiting_ack",
+      new Date(
+        task.dueAt,
+      ).getTime() < currentTime &&
+      task.status ===
+        "awaiting_ack",
   ).length;
 
-  const escalationCount = tasks.filter(
-    (task) =>
-      task.escalationLevel > 0 || task.status === "escalated",
-  ).length;
+  const escalationCount =
+    tasks.filter(
+      (task) =>
+        task.escalationLevel > 0 ||
+        task.status === "escalated",
+    ).length;
 
-  const acknowledgedCount = tasks.filter(
-    (task) => task.status === "acknowledged",
-  ).length;
+  const acknowledgedCount =
+    tasks.filter(
+      (task) =>
+        task.status ===
+        "acknowledged",
+    ).length;
 
-  const criticalCount = tasks.filter(
-    (task) => task.severity === "critical",
-  ).length;
+  const criticalCount =
+    tasks.filter(
+      (task) =>
+        task.severity === "critical",
+    ).length;
 
-  async function handleAcknowledge(task: ClinicalTask) {
+  async function handleAcknowledge(
+    task: ClinicalTask,
+  ) {
     setBusy(true);
     setDrawerError(null);
 
     try {
-      await new Promise((resolve) => window.setTimeout(resolve, 650));
-
-      const acknowledgedTask: ClinicalTask = {
-        ...task,
-        status: "acknowledged",
-        version: task.version + 1,
-      };
-
-      setTasks((currentTasks) =>
-        currentTasks.map((currentTask) =>
-          currentTask.id === task.id
-            ? acknowledgedTask
-            : currentTask,
-        ),
+      await acknowledgeTask(
+        task.id,
+        task.version,
       );
 
-      setSelectedTask(acknowledgedTask);
+      setEvents(
+        (currentEvents) => [
+          {
+            id: crypto.randomUUID(),
+            taskId: task.id,
+            resultId: task.resultId,
+            type: "task_acknowledged",
+            description:
+              `Task ${task.id.slice(
+                0,
+                8,
+              )} acknowledged by clinician-42.`,
+            timestamp:
+              new Date().toISOString(),
+          },
+          ...currentEvents,
+        ],
+      );
 
-      setEvents((currentEvents) => [
-        {
-          id: `event-${crypto.randomUUID()}`,
-          taskId: task.id,
-          resultId: task.resultId,
-          type: "task_acknowledged",
-          description:
-            `Task ${task.id} acknowledged by clinician-42.`,
-          timestamp: new Date().toISOString(),
-        },
-        ...currentEvents,
-      ]);
-    } catch {
-      setDrawerError("The task could not be acknowledged.");
+      await loadBackendData();
+    } catch (error) {
+      setDrawerError(
+        error instanceof Error
+          ? error.message
+          : "The task could not be acknowledged.",
+      );
     } finally {
       setBusy(false);
     }
@@ -1267,27 +1630,33 @@ function App() {
     value: string,
   ) {
     setSubmitSuccess(null);
+    setSubmitError(null);
 
-    setSubmitForm((currentForm) => ({
-      ...currentForm,
-      [field]: value,
-    }));
+    const unitByTest: Record<
+      string,
+      string
+    > = {
+      serum_potassium: "mmol/L",
+      troponin_t: "ng/L",
+      haemoglobin: "g/L",
+      c_reactive_protein: "mg/L",
+      white_blood_cell_count:
+        "10⁹/L",
+    };
 
-    if (field === "test") {
-      const unitByTest: Record<string, string> = {
-        serum_potassium: "mmol/L",
-        troponin_t: "ng/L",
-        haemoglobin: "g/L",
-        c_reactive_protein: "mg/L",
-        white_blood_cell_count: "10⁹/L",
-      };
-
-      setSubmitForm((currentForm) => ({
+    setSubmitForm(
+      (currentForm) => ({
         ...currentForm,
-        test: value,
-        unit: unitByTest[value] ?? currentForm.unit,
-      }));
-    }
+        [field]: value,
+        ...(field === "test"
+          ? {
+              unit:
+                unitByTest[value] ??
+                currentForm.unit,
+            }
+          : {}),
+      }),
+    );
   }
 
   async function handleSubmitResult(
@@ -1295,109 +1664,80 @@ function App() {
   ) {
     event.preventDefault();
 
-    const numericValue = Number(submitForm.value);
+    const numericValue =
+      Number(submitForm.value);
 
-    if (!Number.isFinite(numericValue)) {
+    if (
+      !Number.isFinite(numericValue)
+    ) {
+      setSubmitError(
+        "The result value must be a valid number.",
+      );
+
       return;
     }
 
     setSubmittingResult(true);
     setSubmitSuccess(null);
+    setSubmitError(null);
 
-    await new Promise((resolve) => window.setTimeout(resolve, 850));
+    try {
+      await createResult({
+        source_system:
+          submitForm.sourceSystem,
 
-    const resultShortId = createShortId();
-    const taskId = createShortId();
-    const resultId = `result-${resultShortId}`;
-    const timestamp = new Date();
+        source_result_id:
+          submitForm.sourceResultId,
 
-    const classification = classifyResult(
-      submitForm.test,
-      numericValue,
-    );
+        patient_reference:
+          submitForm.patientReference,
 
-    const result: ClinicalResult = {
-      id: resultId,
-      patientReference: submitForm.patientReference,
-      test: submitForm.test,
-      value: numericValue,
-      unit: submitForm.unit,
-      severity: classification.severity,
-      sourceSystem: submitForm.sourceSystem,
-      sourceResultId: submitForm.sourceResultId,
-      reportedAt: timestamp.toISOString(),
-      receivedAt: timestamp.toISOString(),
-      matchedRule: classification.rule,
-    };
+        test_code:
+          submitForm.test,
 
-    const task: ClinicalTask = {
-      id: taskId,
-      resultId,
-      patientReference: submitForm.patientReference,
-      test: submitForm.test,
-      value: numericValue,
-      unit: submitForm.unit,
-      severity: classification.severity,
-      status: "awaiting_ack",
-      assignedTeam: classification.assignedTeam,
-      dueAt: new Date(
-        timestamp.getTime() +
-          classification.deadlineMinutes * 60_000,
-      ).toISOString(),
-      escalationLevel: 0,
-      version: 3,
-      reportedAt: timestamp.toISOString(),
-    };
+        value: numericValue,
+        unit: submitForm.unit,
 
-    setResults((currentResults) => [result, ...currentResults]);
-    setTasks((currentTasks) => [task, ...currentTasks]);
+        reported_at:
+          new Date().toISOString(),
+      });
 
-    setEvents((currentEvents) => [
-      {
-        id: `event-${crypto.randomUUID()}`,
-        taskId,
-        resultId,
-        type: "notification_delivered",
-        description:
-          `Push notification delivered to ${classification.assignedTeam}.`,
-        timestamp: new Date(timestamp.getTime() + 300).toISOString(),
-      },
-      {
-        id: `event-${crypto.randomUUID()}`,
-        taskId,
-        resultId,
-        type: "task_created",
-        description:
-          `${classification.severity} ${formatLabel(
-            submitForm.test,
-          )} result created task ${taskId}.`,
-        timestamp: new Date(timestamp.getTime() + 200).toISOString(),
-      },
-      {
-        id: `event-${crypto.randomUUID()}`,
-        resultId,
-        type: "result_classified",
-        description:
-          `Result classified as ${classification.severity} using rule: ${classification.rule}.`,
-        timestamp: new Date(timestamp.getTime() + 100).toISOString(),
-      },
-      {
-        id: `event-${crypto.randomUUID()}`,
-        resultId,
-        type: "result_received",
-        description:
-          `Result ${submitForm.sourceResultId} received from ${submitForm.sourceSystem}.`,
-        timestamp: timestamp.toISOString(),
-      },
-      ...currentEvents,
-    ]);
+      setEvents(
+        (currentEvents) => [
+          {
+            id: crypto.randomUUID(),
+            type: "result_received",
+            description:
+              `Result ${submitForm.sourceResultId} submitted to the Go API.`,
+            timestamp:
+              new Date().toISOString(),
+          },
+          ...currentEvents,
+        ],
+      );
 
-    setSubmitSuccess(
-      `Workflow created. Result classified as ${classification.severity} and task ${taskId} assigned to ${classification.assignedTeam}.`,
-    );
+      setSubmitSuccess(
+        "Result submitted successfully. The worker will now process the generated task.",
+      );
 
-    setSubmittingResult(false);
-    setSelectedTask(task);
+      setSubmitForm(
+        (currentForm) => ({
+          ...currentForm,
+          sourceResultId:
+            `LIMS-DEMO-${Date.now()}`,
+        }),
+      );
+
+      await loadBackendData();
+    } catch (error) {
+      setSubmitError(
+        error instanceof Error
+          ? error.message
+          : "The result could not be submitted.",
+      );
+    } finally {
+      setSubmittingResult(false);
+    }
   }
 
   function clearTaskFilters() {
@@ -1411,22 +1751,35 @@ function App() {
       <section className="task-page-summary">
         <div>
           <span>Total tasks</span>
-          <strong>{tasks.length}</strong>
+          <strong>
+            {tasks.length}
+          </strong>
         </div>
 
         <div>
           <span>Critical</span>
-          <strong>{criticalCount}</strong>
+          <strong>
+            {criticalCount}
+          </strong>
         </div>
 
         <div>
-          <span>Awaiting acknowledgement</span>
-          <strong>{awaitingAcknowledgementCount}</strong>
+          <span>
+            Awaiting acknowledgement
+          </span>
+
+          <strong>
+            {
+              awaitingAcknowledgementCount
+            }
+          </strong>
         </div>
 
         <div>
           <span>Escalated</span>
-          <strong>{escalationCount}</strong>
+          <strong>
+            {escalationCount}
+          </strong>
         </div>
       </section>
     );
@@ -1440,7 +1793,8 @@ function App() {
             <h1>Dashboard</h1>
 
             <p>
-              Real-time view of synthetic clinical results and task
+              Live view of clinical
+              results and task
               escalation.
             </p>
           </div>
@@ -1448,59 +1802,94 @@ function App() {
           <button
             className="secondary-button"
             type="button"
-            onClick={() => setCurrentTime(Date.now())}
+            disabled={loadingData}
+            onClick={() =>
+              void loadBackendData()
+            }
           >
             <RefreshCw size={16} />
-            Refresh
+
+            {loadingData
+              ? "Refreshing…"
+              : "Refresh"}
           </button>
         </section>
+
+        {dataError ? (
+          <div className="error-banner">
+            API error: {dataError}
+          </div>
+        ) : null}
 
         <section className="metrics-grid">
           <MetricCard
             title="Results"
-            value={String(results.length)}
+            value={String(
+              results.length,
+            )}
             tone="blue"
-            caption="Synthetic results received"
+            caption="Loaded from PostgreSQL"
           />
 
           <MetricCard
             title="Awaiting acknowledgement"
-            value={String(awaitingAcknowledgementCount)}
+            value={String(
+              awaitingAcknowledgementCount,
+            )}
             tone="purple"
             caption={`${tasks.length} total tasks`}
           />
 
           <MetricCard
             title="Overdue tasks"
-            value={String(overdueCount)}
+            value={String(
+              overdueCount,
+            )}
             tone="red"
             caption="Needs immediate review"
           />
 
           <MetricCard
             title="Escalations"
-            value={String(escalationCount)}
+            value={String(
+              escalationCount,
+            )}
             tone="amber"
             caption="Severity-aware routing"
           />
 
           <MetricCard
             title="Acknowledged"
-            value={String(acknowledgedCount)}
+            value={String(
+              acknowledgedCount,
+            )}
             tone="green"
-            caption="Completed clinician actions"
+            caption="Persisted clinician actions"
           />
         </section>
 
         <section className="dashboard-grid">
           <TaskTable
-            tasks={filteredTasks.slice(0, 5)}
-            currentTime={currentTime}
-            severityFilter={severityFilter}
-            statusFilter={statusFilter}
+            tasks={filteredTasks.slice(
+              0,
+              5,
+            )}
+            currentTime={
+              currentTime
+            }
+            severityFilter={
+              severityFilter
+            }
+            statusFilter={
+              statusFilter
+            }
             query={query}
-            onSeverityChange={setSeverityFilter}
-            onStatusChange={setStatusFilter}
+            onSeverityChange={
+              setSeverityFilter
+            }
+            onStatusChange={
+              setStatusFilter
+            }
             onQueryChange={setQuery}
             onSelect={(task) => {
               setSelectedTask(task);
@@ -1508,21 +1897,36 @@ function App() {
             }}
           />
 
-          <ActivityFeed events={events.slice(0, 6)} />
+          <ActivityFeed
+            events={events.slice(
+              0,
+              6,
+            )}
+          />
         </section>
 
         <section className="bottom-grid">
           <article className="panel compact-panel">
             <div className="panel-heading">
               <div>
-                <h2>Task status distribution</h2>
-                <p>Current workflow state.</p>
+                <h2>
+                  Task status
+                  distribution
+                </h2>
+
+                <p>
+                  Current PostgreSQL
+                  workflow state.
+                </p>
               </div>
             </div>
 
             <div className="donut-row">
               <div className="donut">
-                <span>{tasks.length}</span>
+                <span>
+                  {tasks.length}
+                </span>
+
                 <small>Total</small>
               </div>
 
@@ -1530,16 +1934,24 @@ function App() {
                 <li>
                   <span className="dot purple" />
                   Awaiting acknowledgement
-                  <strong>{awaitingAcknowledgementCount}</strong>
+
+                  <strong>
+                    {
+                      awaitingAcknowledgementCount
+                    }
+                  </strong>
                 </li>
 
                 <li>
                   <span className="dot blue" />
                   Processing
+
                   <strong>
                     {
                       tasks.filter(
-                        (task) => task.status === "processing",
+                        (task) =>
+                          task.status ===
+                          "processing",
                       ).length
                     }
                   </strong>
@@ -1548,10 +1960,13 @@ function App() {
                 <li>
                   <span className="dot amber" />
                   Pending
+
                   <strong>
                     {
                       tasks.filter(
-                        (task) => task.status === "pending",
+                        (task) =>
+                          task.status ===
+                          "pending",
                       ).length
                     }
                   </strong>
@@ -1560,7 +1975,12 @@ function App() {
                 <li>
                   <span className="dot red" />
                   Escalated
-                  <strong>{escalationCount}</strong>
+
+                  <strong>
+                    {
+                      escalationCount
+                    }
+                  </strong>
                 </li>
               </ul>
             </div>
@@ -1569,25 +1989,32 @@ function App() {
           <article className="panel compact-panel">
             <div className="panel-heading">
               <div>
-                <h2>System status</h2>
-                <p>Local demonstration services.</p>
+                <h2>
+                  Connected services
+                </h2>
+
+                <p>
+                  Live demonstration
+                  architecture.
+                </p>
               </div>
             </div>
 
             <div className="status-list">
               {[
-                "API",
-                "Workers",
+                "React UI",
+                "Go API",
+                "Worker",
                 "Scheduler",
                 "PostgreSQL",
-                "Prometheus",
-                "Jaeger",
               ].map((service) => (
                 <div key={service}>
-                  <span>{service}</span>
+                  <span>
+                    {service}
+                  </span>
 
                   <strong>
-                    Healthy <i />
+                    Connected <i />
                   </strong>
                 </div>
               ))}
@@ -1608,32 +2035,53 @@ function App() {
           <>
             <section className="page-heading">
               <div>
-                <h1>Clinical tasks</h1>
+                <h1>
+                  Clinical tasks
+                </h1>
 
                 <p>
-                  Review, filter and acknowledge clinical workflow tasks.
+                  Review and acknowledge
+                  database-backed tasks.
                 </p>
               </div>
 
               <button
                 className="secondary-button"
                 type="button"
-                onClick={clearTaskFilters}
+                onClick={
+                  clearTaskFilters
+                }
               >
                 Clear filters
               </button>
             </section>
 
+            {dataError ? (
+              <div className="error-banner">
+                API error: {dataError}
+              </div>
+            ) : null}
+
             {renderTaskSummary()}
 
             <TaskTable
               tasks={filteredTasks}
-              currentTime={currentTime}
-              severityFilter={severityFilter}
-              statusFilter={statusFilter}
+              currentTime={
+                currentTime
+              }
+              severityFilter={
+                severityFilter
+              }
+              statusFilter={
+                statusFilter
+              }
               query={query}
-              onSeverityChange={setSeverityFilter}
-              onStatusChange={setStatusFilter}
+              onSeverityChange={
+                setSeverityFilter
+              }
+              onStatusChange={
+                setStatusFilter
+              }
               onQueryChange={setQuery}
               onSelect={(task) => {
                 setSelectedTask(task);
@@ -1648,25 +2096,41 @@ function App() {
           <>
             <section className="page-heading">
               <div>
-                <h1>Clinical results</h1>
+                <h1>
+                  Clinical results
+                </h1>
 
                 <p>
-                  Results received and classified by the demonstration
-                  workflow engine.
+                  Results stored by the
+                  Go backend.
                 </p>
               </div>
 
               <button
                 className="secondary-button"
                 type="button"
-                onClick={() => setActivePage("submit-result")}
+                onClick={() =>
+                  setActivePage(
+                    "submit-result",
+                  )
+                }
               >
-                <Stethoscope size={16} />
+                <Stethoscope
+                  size={16}
+                />
                 Submit result
               </button>
             </section>
 
-            <ResultsTable results={results} />
+            {dataError ? (
+              <div className="error-banner">
+                API error: {dataError}
+              </div>
+            ) : null}
+
+            <ResultsTable
+              results={results}
+            />
           </>
         );
 
@@ -1678,8 +2142,9 @@ function App() {
                 <h1>Escalations</h1>
 
                 <p>
-                  Tasks that have moved beyond their original responsible
-                  team.
+                  Tasks that have moved
+                  beyond their original
+                  responsible team.
                 </p>
               </div>
             </section>
@@ -1689,16 +2154,26 @@ function App() {
             <TaskTable
               tasks={tasks.filter(
                 (task) =>
-                  task.status === "escalated" ||
-                  task.escalationLevel > 0,
+                  task.status ===
+                    "escalated" ||
+                  task.escalationLevel >
+                    0,
               )}
-              currentTime={currentTime}
+              currentTime={
+                currentTime
+              }
               severityFilter="all"
               statusFilter="all"
               query=""
-              onSeverityChange={() => undefined}
-              onStatusChange={() => undefined}
-              onQueryChange={() => undefined}
+              onSeverityChange={() =>
+                undefined
+              }
+              onStatusChange={() =>
+                undefined
+              }
+              onQueryChange={() =>
+                undefined
+              }
               onSelect={(task) => {
                 setSelectedTask(task);
                 setDrawerError(null);
@@ -1711,10 +2186,21 @@ function App() {
         return (
           <SubmitResultPage
             form={submitForm}
-            submitting={submittingResult}
-            successMessage={submitSuccess}
-            onFormChange={handleFormChange}
-            onSubmit={handleSubmitResult}
+            submitting={
+              submittingResult
+            }
+            successMessage={
+              submitSuccess
+            }
+            errorMessage={
+              submitError
+            }
+            onFormChange={
+              handleFormChange
+            }
+            onSubmit={
+              handleSubmitResult
+            }
           />
         );
 
@@ -1722,29 +2208,54 @@ function App() {
         return (
           <PlaceholderPage
             title="Notifications"
-            description="Delivery attempts generated by the synthetic workflow."
+            description="Notification activity generated during this browser session."
           >
             <div className="notification-list">
               {events
                 .filter(
-                  (event) => event.type === "notification_delivered",
+                  (event) =>
+                    event.type ===
+                      "notification_delivered" ||
+                    event.type ===
+                      "result_received",
                 )
                 .map((event) => (
-                  <article key={event.id}>
+                  <article
+                    key={event.id}
+                  >
                     <span className="notification-icon">
-                      <BellRing size={18} />
+                      <BellRing
+                        size={18}
+                      />
                     </span>
 
                     <div>
-                      <strong>Push notification delivered</strong>
-                      <p>{event.description}</p>
+                      <strong>
+                        {formatLabel(
+                          event.type,
+                        )}
+                      </strong>
+
+                      <p>
+                        {
+                          event.description
+                        }
+                      </p>
                     </div>
 
                     <time>
-                      {new Date(event.timestamp).toLocaleTimeString()}
+                      {new Date(
+                        event.timestamp,
+                      ).toLocaleTimeString()}
                     </time>
                   </article>
                 ))}
+
+              {events.length === 0 ? (
+                <div className="empty-state">
+                  No local activity yet.
+                </div>
+              ) : null}
             </div>
           </PlaceholderPage>
         );
@@ -1753,35 +2264,43 @@ function App() {
         return (
           <PlaceholderPage
             title="Metrics"
-            description="A simplified UI representation of workflow metrics."
+            description="Live summary derived from the task and result APIs."
           >
             <section className="metrics-grid embedded-metrics">
               <MetricCard
                 title="Results ingested"
-                value={String(results.length)}
+                value={String(
+                  results.length,
+                )}
                 tone="blue"
-                caption="clinical_results_ingested_total"
+                caption="GET /v1/results"
               />
 
               <MetricCard
-                title="Tasks claimed"
-                value={String(tasks.length)}
+                title="Tasks"
+                value={String(
+                  tasks.length,
+                )}
                 tone="purple"
-                caption="clinical_tasks_claimed_total"
+                caption="GET /v1/tasks"
               />
 
               <MetricCard
                 title="Escalations"
-                value={String(escalationCount)}
+                value={String(
+                  escalationCount,
+                )}
                 tone="amber"
-                caption="clinical_escalations_total"
+                caption="Current task state"
               />
 
               <MetricCard
                 title="Acknowledgements"
-                value={String(acknowledgedCount)}
+                value={String(
+                  acknowledgedCount,
+                )}
                 tone="green"
-                caption="Synthetic UI state"
+                caption="Persisted workflow state"
               />
             </section>
           </PlaceholderPage>
@@ -1791,27 +2310,53 @@ function App() {
         return (
           <PlaceholderPage
             title="Settings"
-            description="Demonstration configuration for the clinician UI."
+            description="Frontend configuration for the live demonstration."
           >
             <div className="settings-list">
               <label>
-                <span>Signed-in clinician</span>
-                <input value="clinician-42" readOnly />
-              </label>
+                <span>
+                  Signed-in clinician
+                </span>
 
-              <label>
-                <span>Default team</span>
-                <input value="acute-medicine" readOnly />
+                <input
+                  value="clinician-42"
+                  readOnly
+                />
               </label>
 
               <label>
                 <span>Data mode</span>
-                <input value="Synthetic demonstration data" readOnly />
+
+                <input
+                  value="Live Go API"
+                  readOnly
+                />
               </label>
 
               <label>
-                <span>API mode</span>
-                <input value="Frontend mock workflow" readOnly />
+                <span>
+                  Refresh interval
+                </span>
+
+                <input
+                  value="5 seconds"
+                  readOnly
+                />
+              </label>
+
+              <label>
+                <span>
+                  API environment variable
+                </span>
+
+                <input
+                  value={
+                    import.meta.env
+                      .VITE_API_URL ??
+                    "http://localhost:8080"
+                  }
+                  readOnly
+                />
               </label>
             </div>
           </PlaceholderPage>
@@ -1823,23 +2368,37 @@ function App() {
     <div className="app-shell">
       <Sidebar
         activePage={activePage}
-        taskCount={awaitingAcknowledgementCount}
-        escalationCount={escalationCount}
-        onPageChange={setActivePage}
+        taskCount={
+          awaitingAcknowledgementCount
+        }
+        escalationCount={
+          escalationCount
+        }
+        onPageChange={
+          setActivePage
+        }
       />
 
       <main>
         <header className="topbar">
-          <div className="mobile-brand">Clinical Escalation</div>
+          <div className="mobile-brand">
+            Clinical Escalation
+          </div>
 
           <div className="topbar-actions">
-            <span className="health-indicator">Healthy</span>
+            <span className="health-indicator">
+              Live
+            </span>
 
             <button
               className="icon-button"
               type="button"
               aria-label="Notifications"
-              onClick={() => setActivePage("notifications")}
+              onClick={() =>
+                setActivePage(
+                  "notifications",
+                )
+              }
             >
               <Bell size={18} />
             </button>
@@ -1852,11 +2411,15 @@ function App() {
               <CircleHelp size={18} />
             </button>
 
-            <div className="user-chip">clinician-42</div>
+            <div className="user-chip">
+              clinician-42
+            </div>
           </div>
         </header>
 
-        <div className="content">{renderCurrentPage()}</div>
+        <div className="content">
+          {renderCurrentPage()}
+        </div>
       </main>
 
       <TaskDrawer
@@ -1867,7 +2430,9 @@ function App() {
           setSelectedTask(null);
           setDrawerError(null);
         }}
-        onAcknowledge={handleAcknowledge}
+        onAcknowledge={
+          handleAcknowledge
+        }
       />
     </div>
   );

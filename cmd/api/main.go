@@ -46,10 +46,11 @@ func run() error {
 		)
 	}
 
-	telemetryProviders, err := telemetry.Initialise(
-		context.Background(),
-		telemetryConfig,
-	)
+	telemetryProviders, err :=
+		telemetry.Initialise(
+			context.Background(),
+			telemetryConfig,
+		)
 	if err != nil {
 		return fmt.Errorf(
 			"initialise telemetry: %w",
@@ -57,9 +58,12 @@ func run() error {
 		)
 	}
 
-	defer shutdownTelemetry(telemetryProviders)
+	defer shutdownTelemetry(
+		telemetryProviders,
+	)
 
-	applicationMetrics, err := telemetry.NewMetrics()
+	applicationMetrics, err :=
+		telemetry.NewMetrics()
 	if err != nil {
 		return fmt.Errorf(
 			"create application metrics: %w",
@@ -67,8 +71,21 @@ func run() error {
 		)
 	}
 
-	databaseURL := os.Getenv("DATABASE_URL")
-	httpPort := os.Getenv("HTTP_PORT")
+	databaseURL :=
+		os.Getenv("DATABASE_URL")
+
+	if databaseURL == "" {
+		return errors.New(
+			"DATABASE_URL is required",
+		)
+	}
+
+	httpPort := os.Getenv("PORT")
+
+	if httpPort == "" {
+		httpPort =
+			os.Getenv("HTTP_PORT")
+	}
 
 	if httpPort == "" {
 		httpPort = "8080"
@@ -76,10 +93,11 @@ func run() error {
 
 	ctx := context.Background()
 
-	databasePool, err := database.Connect(
-		ctx,
-		databaseURL,
-	)
+	databasePool, err :=
+		database.Connect(
+			ctx,
+			databaseURL,
+		)
 	if err != nil {
 		return fmt.Errorf(
 			"connect to database: %w",
@@ -93,21 +111,30 @@ func run() error {
 			databasePool,
 		)
 
-	resultService := clinicalresult.NewService(
-		resultRepository,
-		applicationMetrics,
-	)
+	resultService :=
+		clinicalresult.NewService(
+			resultRepository,
+			applicationMetrics,
+		)
 
 	taskRepository :=
 		clinicaltask.NewPostgresRepository(
 			databasePool,
 		)
 
-	healthHandler := handlers.NewHealthHandler()
+	healthHandler :=
+		handlers.NewHealthHandler()
 
-	resultHandler := handlers.NewResultHandler(
-		resultService,
-	)
+	resultHandler :=
+		handlers.NewResultHandler(
+			resultService,
+		)
+
+	readHandler :=
+		handlers.NewReadHandler(
+			taskRepository,
+			resultRepository,
+		)
 
 	acknowledgementHandler :=
 		handlers.NewAcknowledgementHandler(
@@ -118,11 +145,12 @@ func run() error {
 	router := api.NewRouter(
 		healthHandler,
 		resultHandler,
+		readHandler,
 		acknowledgementHandler,
 	)
 
 	server := &http.Server{
-		Addr:              ":" + httpPort,
+		Addr:              "0.0.0.0:" + httpPort,
 		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
@@ -130,7 +158,8 @@ func run() error {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	serverErrors := make(chan error, 1)
+	serverErrors :=
+		make(chan error, 1)
 
 	go func() {
 		log.Printf(
@@ -139,12 +168,16 @@ func run() error {
 		)
 
 		if err := server.ListenAndServe(); err != nil &&
-			!errors.Is(err, http.ErrServerClosed) {
+			!errors.Is(
+				err,
+				http.ErrServerClosed,
+			) {
 			serverErrors <- err
 		}
 	}()
 
-	shutdownSignals := make(chan os.Signal, 1)
+	shutdownSignals :=
+		make(chan os.Signal, 1)
 
 	signal.Notify(
 		shutdownSignals,
@@ -153,7 +186,8 @@ func run() error {
 	)
 
 	select {
-	case receivedSignal := <-shutdownSignals:
+	case receivedSignal :=
+		<-shutdownSignals:
 		log.Printf(
 			"received shutdown signal: %s",
 			receivedSignal,
@@ -166,13 +200,16 @@ func run() error {
 		)
 	}
 
-	shutdownContext, cancel := context.WithTimeout(
-		context.Background(),
-		10*time.Second,
-	)
+	shutdownContext, cancel :=
+		context.WithTimeout(
+			context.Background(),
+			10*time.Second,
+		)
 	defer cancel()
 
-	if err := server.Shutdown(shutdownContext); err != nil {
+	if err := server.Shutdown(
+		shutdownContext,
+	); err != nil {
 		return fmt.Errorf(
 			"gracefully shut down HTTP server: %w",
 			err,
@@ -187,10 +224,11 @@ func run() error {
 func shutdownTelemetry(
 	providers *telemetry.Providers,
 ) {
-	shutdownContext, cancel := context.WithTimeout(
-		context.Background(),
-		5*time.Second,
-	)
+	shutdownContext, cancel :=
+		context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
 	defer cancel()
 
 	if err := providers.Shutdown(
