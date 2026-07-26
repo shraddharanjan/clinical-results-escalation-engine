@@ -19,7 +19,7 @@ type TaskEscalator interface {
 	EscalateOne(
 		ctx context.Context,
 		schedulerID string,
-	) (clinicaltask.Task, error)
+	) (Outcome, error)
 }
 
 type Scheduler struct {
@@ -79,8 +79,7 @@ func (s *Scheduler) Run(
 			return nil
 		}
 
-		escalatedTask, err :=
-			s.escalateOne(ctx)
+		outcome, err := s.escalateOne(ctx)
 
 		if errors.Is(err, ErrNoOverdueTask) {
 			if err := waitForContext(
@@ -102,7 +101,7 @@ func (s *Scheduler) Run(
 
 		if err != nil {
 			log.Printf(
-				"scheduler %s failed to escalate task: %v",
+				"scheduler %s failed to process overdue task: %v",
 				s.schedulerID,
 				err,
 			)
@@ -119,22 +118,33 @@ func (s *Scheduler) Run(
 
 		s.metrics.RecordEscalation(
 			ctx,
-			escalatedTask.EscalationLevel,
+			outcome.Task.EscalationLevel,
 		)
+
+		if outcome.Exhausted {
+			log.Printf(
+				"scheduler %s exhausted escalation for task %s at level %d; task marked failed",
+				s.schedulerID,
+				outcome.Task.ID,
+				outcome.Task.EscalationLevel,
+			)
+
+			continue
+		}
 
 		log.Printf(
 			"scheduler %s escalated task %s to level %d team=%s",
 			s.schedulerID,
-			escalatedTask.ID,
-			escalatedTask.EscalationLevel,
-			escalatedTask.AssignedTeam,
+			outcome.Task.ID,
+			outcome.Task.EscalationLevel,
+			outcome.Task.AssignedTeam,
 		)
 	}
 }
 
 func (s *Scheduler) escalateOne(
 	ctx context.Context,
-) (clinicaltask.Task, error) {
+) (Outcome, error) {
 	tracer := otel.Tracer(
 		"clinical-results-escalation-engine/escalation",
 	)
@@ -152,14 +162,13 @@ func (s *Scheduler) escalateOne(
 		)
 	defer cancel()
 
-	escalatedTask, err :=
-		s.repository.EscalateOne(
-			escalationContext,
-			s.schedulerID,
-		)
+	outcome, err := s.repository.EscalateOne(
+		escalationContext,
+		s.schedulerID,
+	)
 
 	if errors.Is(err, ErrNoOverdueTask) {
-		return clinicaltask.Task{}, err
+		return Outcome{}, err
 	}
 
 	if err != nil {
@@ -169,34 +178,45 @@ func (s *Scheduler) escalateOne(
 			err.Error(),
 		)
 
-		return clinicaltask.Task{}, err
+		return Outcome{}, err
 	}
 
 	span.SetAttributes(
 		attribute.String(
 			"clinical.task.id",
-			escalatedTask.ID.String(),
+			outcome.Task.ID.String(),
 		),
 		attribute.Int(
 			"clinical.task.escalation_level",
-			escalatedTask.EscalationLevel,
+			outcome.Task.EscalationLevel,
 		),
 		attribute.String(
 			"clinical.task.assigned_team",
-			escalatedTask.AssignedTeam,
+			outcome.Task.AssignedTeam,
 		),
 		attribute.String(
 			"scheduler.id",
 			s.schedulerID,
 		),
+		attribute.Bool(
+			"clinical.task.escalation_exhausted",
+			outcome.Exhausted,
+		),
 	)
 
-	span.SetStatus(
-		codes.Ok,
-		"task escalated",
-	)
+	if outcome.Exhausted {
+		span.SetStatus(
+			codes.Ok,
+			"maximum escalation level reached",
+		)
+	} else {
+		span.SetStatus(
+			codes.Ok,
+			"task escalated",
+		)
+	}
 
-	return escalatedTask, nil
+	return outcome, nil
 }
 
 func waitForContext(

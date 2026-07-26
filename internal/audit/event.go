@@ -11,23 +11,35 @@ const (
 	AggregateClinicalResult = "clinical_result"
 	AggregateClinicalTask   = "clinical_task"
 
-	EventResultReceived                = "result_received"
-	EventResultClassified              = "result_classified"
-	EventTaskCreated                   = "task_created"
-	EventTaskClaimed                   = "task_claimed"
+	EventResultReceived   = "result_received"
+	EventResultClassified = "result_classified"
+	EventTaskCreated      = "task_created"
+
+	EventTaskClaimed = "task_claimed"
+
 	EventTaskRecoveredAfterLeaseExpiry = "task_recovered_after_lease_expiry"
-	EventTaskReleasedForRetry          = "task_released_for_retry"
-	EventNotificationRequested         = "notification_requested"
 
-	EventNotificationDelivered       = "notification_delivered"
+	EventTaskReleasedForRetry = "task_released_for_retry"
+
+	EventNotificationRequested = "notification_requested"
+
+	EventNotificationDelivered = "notification_delivered"
+
 	EventNotificationTemporaryFailed = "notification_temporary_failed"
-	EventNotificationPermanentFailed = "notification_permanent_failed"
-	EventTaskAwaitingAcknowledgement = "task_awaiting_acknowledgement"
-	EventTaskFailed                  = "task_failed"
 
-	EventTaskAcknowledged              = "task_acknowledged"
+	EventNotificationPermanentFailed = "notification_permanent_failed"
+
+	EventTaskAwaitingAcknowledgement = "task_awaiting_acknowledgement"
+
+	EventTaskFailed = "task_failed"
+
+	EventTaskAcknowledged = "task_acknowledged"
+
 	EventAcknowledgementDeadlineMissed = "acknowledgement_deadline_missed"
-	EventTaskEscalated                 = "task_escalated"
+
+	EventTaskEscalated = "task_escalated"
+
+	EventEscalationExhausted = "task_escalation_exhausted"
 )
 
 type Event struct {

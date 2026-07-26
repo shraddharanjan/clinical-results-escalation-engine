@@ -19,6 +19,25 @@ services:
       timeout: 5s
       retries: 10
 
+  postgres-test:
+    image: postgres:17
+    container_name: clinical-results-postgres-test
+    environment:
+      POSTGRES_DB: clinical_results_test
+      POSTGRES_USER: clinical_test_user
+      POSTGRES_PASSWORD: clinical_test_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - ../migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U clinical_test_user -d clinical_results_test
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
   jaeger:
     image: jaegertracing/all-in-one:1.76.0
     container_name: clinical-results-jaeger

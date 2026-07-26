@@ -440,15 +440,15 @@ func (w *Worker) processClaim(
 				processingContext,
 			)
 
-span.AddEvent(
-	"task lease renewed",
-	trace.WithAttributes(
-		attribute.String(
-			"lease.expires_at",
-			newExpiry.Format(time.RFC3339),
-		),
-	),
-)
+			span.AddEvent(
+				"task lease renewed",
+				trace.WithAttributes(
+					attribute.String(
+						"lease.expires_at",
+						newExpiry.Format(time.RFC3339),
+					),
+				),
+			)
 
 			log.Printf(
 				"worker %s renewed task %s lease until %s",

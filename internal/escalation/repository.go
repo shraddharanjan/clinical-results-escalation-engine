@@ -14,9 +14,16 @@ import (
 	clinicaltask "github.com/shraddharanjan/clinical-results-escalation-engine/internal/task"
 )
 
+const MaximumEscalationLevel = 3
+
 var ErrNoOverdueTask = errors.New(
 	"no overdue acknowledgement task available",
 )
+
+type Outcome struct {
+	Task      clinicaltask.Task
+	Exhausted bool
+}
 
 type Repository struct {
 	pool *pgxpool.Pool
@@ -33,10 +40,10 @@ func NewRepository(
 func (r *Repository) EscalateOne(
 	ctx context.Context,
 	schedulerID string,
-) (clinicaltask.Task, error) {
+) (Outcome, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return clinicaltask.Task{}, fmt.Errorf(
+		return Outcome{}, fmt.Errorf(
 			"begin escalation transaction: %w",
 			err,
 		)
@@ -51,20 +58,78 @@ func (r *Repository) EscalateOne(
 		tx,
 	)
 	if err != nil {
-		return clinicaltask.Task{}, err
+		return Outcome{}, err
 	}
 
+	if overdueTask.EscalationLevel >=
+		MaximumEscalationLevel {
+		failedTask, err := exhaustEscalation(
+			ctx,
+			tx,
+			overdueTask,
+			schedulerID,
+		)
+		if err != nil {
+			return Outcome{}, err
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			return Outcome{}, fmt.Errorf(
+				"commit escalation exhaustion transaction: %w",
+				err,
+			)
+		}
+
+		return Outcome{
+			Task:      failedTask,
+			Exhausted: true,
+		}, nil
+	}
+
+	escalatedTask, err := escalateTask(
+		ctx,
+		tx,
+		overdueTask,
+		schedulerID,
+	)
+	if err != nil {
+		return Outcome{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Outcome{}, fmt.Errorf(
+			"commit escalation transaction: %w",
+			err,
+		)
+	}
+
+	return Outcome{
+		Task:      escalatedTask,
+		Exhausted: false,
+	}, nil
+}
+
+func escalateTask(
+	ctx context.Context,
+	tx pgx.Tx,
+	overdueTask clinicaltask.Task,
+	schedulerID string,
+) (clinicaltask.Task, error) {
 	previousLevel := overdueTask.EscalationLevel
 	previousTeam := overdueTask.AssignedTeam
 	previousDeadline := overdueTask.AcknowledgementDueAt
 
 	nextLevel := previousLevel + 1
-	nextTeam, acknowledgementTimeout :=
-		escalationTarget(nextLevel)
 
-	nextDeadline := time.Now().UTC().Add(
-		acknowledgementTimeout,
-	)
+	nextTeam, acknowledgementTimeout, err :=
+		escalationTarget(nextLevel)
+	if err != nil {
+		return clinicaltask.Task{}, err
+	}
+
+	nextDeadline := time.Now().
+		UTC().
+		Add(acknowledgementTimeout)
 
 	const updateQuery = `
 		UPDATE clinical_tasks
@@ -131,6 +196,7 @@ func (r *Repository) EscalateOne(
 		&escalatedTask.CreatedAt,
 		&escalatedTask.UpdatedAt,
 	)
+
 	if errors.Is(err, pgx.ErrNoRows) {
 		return clinicaltask.Task{},
 			clinicaltask.ErrTaskStateConflict
@@ -143,11 +209,13 @@ func (r *Repository) EscalateOne(
 		)
 	}
 
-	deadlinePayload, err := json.Marshal(map[string]any{
-		"previous_deadline": previousDeadline,
-		"escalation_level":  previousLevel,
-		"assigned_team":     previousTeam,
-	})
+	deadlinePayload, err := json.Marshal(
+		map[string]any{
+			"previous_deadline": previousDeadline,
+			"escalation_level":  previousLevel,
+			"assigned_team":     previousTeam,
+		},
+	)
 	if err != nil {
 		return clinicaltask.Task{}, fmt.Errorf(
 			"marshal deadline-missed payload: %w",
@@ -166,16 +234,18 @@ func (r *Repository) EscalateOne(
 		return clinicaltask.Task{}, err
 	}
 
-	escalationPayload, err := json.Marshal(map[string]any{
-		"previous_level":  previousLevel,
-		"new_level":       nextLevel,
-		"previous_team":   previousTeam,
-		"new_team":        nextTeam,
-		"previous_status": clinicaltask.StatusAwaitingAck,
-		"new_status":      clinicaltask.StatusPending,
-		"new_deadline":    nextDeadline,
-		"version":         escalatedTask.Version,
-	})
+	escalationPayload, err := json.Marshal(
+		map[string]any{
+			"previous_level":  previousLevel,
+			"new_level":       nextLevel,
+			"previous_team":   previousTeam,
+			"new_team":        nextTeam,
+			"previous_status": clinicaltask.StatusAwaitingAck,
+			"new_status":      clinicaltask.StatusPending,
+			"new_deadline":    nextDeadline,
+			"version":         escalatedTask.Version,
+		},
+	)
 	if err != nil {
 		return clinicaltask.Task{}, fmt.Errorf(
 			"marshal task escalation payload: %w",
@@ -194,14 +264,144 @@ func (r *Repository) EscalateOne(
 		return clinicaltask.Task{}, err
 	}
 
-	if err := tx.Commit(ctx); err != nil {
+	return escalatedTask, nil
+}
+
+func exhaustEscalation(
+	ctx context.Context,
+	tx pgx.Tx,
+	overdueTask clinicaltask.Task,
+	schedulerID string,
+) (clinicaltask.Task, error) {
+	const failureReason = "maximum acknowledgement escalation level reached"
+
+	const updateQuery = `
+		UPDATE clinical_tasks
+		SET
+			status = 'failed',
+			assigned_user = NULL,
+			acknowledgement_due_at = NULL,
+			lease_owner = NULL,
+			lease_expires_at = NULL,
+			last_error = $2,
+			version = version + 1,
+			updated_at = now()
+		WHERE
+			id = $1
+			AND status = 'awaiting_ack'
+			AND version = $3
+		RETURNING
+			id,
+			result_id,
+			task_type,
+			status,
+			severity::text,
+			assigned_team,
+			assigned_user,
+			escalation_level,
+			available_at,
+			acknowledgement_due_at,
+			lease_owner,
+			lease_expires_at,
+			attempt_count,
+			version,
+			created_at,
+			updated_at
+	`
+
+	var failedTask clinicaltask.Task
+
+	err := tx.QueryRow(
+		ctx,
+		updateQuery,
+		overdueTask.ID,
+		failureReason,
+		overdueTask.Version,
+	).Scan(
+		&failedTask.ID,
+		&failedTask.ResultID,
+		&failedTask.TaskType,
+		&failedTask.Status,
+		&failedTask.Severity,
+		&failedTask.AssignedTeam,
+		&failedTask.AssignedUser,
+		&failedTask.EscalationLevel,
+		&failedTask.AvailableAt,
+		&failedTask.AcknowledgementDueAt,
+		&failedTask.LeaseOwner,
+		&failedTask.LeaseExpiresAt,
+		&failedTask.AttemptCount,
+		&failedTask.Version,
+		&failedTask.CreatedAt,
+		&failedTask.UpdatedAt,
+	)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		return clinicaltask.Task{},
+			clinicaltask.ErrTaskStateConflict
+	}
+
+	if err != nil {
 		return clinicaltask.Task{}, fmt.Errorf(
-			"commit escalation transaction: %w",
+			"mark escalation exhausted task failed: %w",
 			err,
 		)
 	}
 
-	return escalatedTask, nil
+	deadlinePayload, err := json.Marshal(
+		map[string]any{
+			"previous_deadline": overdueTask.AcknowledgementDueAt,
+			"escalation_level":  overdueTask.EscalationLevel,
+			"assigned_team":     overdueTask.AssignedTeam,
+		},
+	)
+	if err != nil {
+		return clinicaltask.Task{}, fmt.Errorf(
+			"marshal terminal deadline payload: %w",
+			err,
+		)
+	}
+
+	if err := insertAuditEvent(
+		ctx,
+		tx,
+		overdueTask.ID,
+		audit.EventAcknowledgementDeadlineMissed,
+		schedulerID,
+		deadlinePayload,
+	); err != nil {
+		return clinicaltask.Task{}, err
+	}
+
+	exhaustedPayload, err := json.Marshal(
+		map[string]any{
+			"maximum_level":   MaximumEscalationLevel,
+			"assigned_team":   overdueTask.AssignedTeam,
+			"previous_status": clinicaltask.StatusAwaitingAck,
+			"new_status":      clinicaltask.StatusFailed,
+			"reason":          failureReason,
+			"version":         failedTask.Version,
+		},
+	)
+	if err != nil {
+		return clinicaltask.Task{}, fmt.Errorf(
+			"marshal escalation-exhausted payload: %w",
+			err,
+		)
+	}
+
+	if err := insertAuditEvent(
+		ctx,
+		tx,
+		overdueTask.ID,
+		audit.EventEscalationExhausted,
+		schedulerID,
+		exhaustedPayload,
+	); err != nil {
+		return clinicaltask.Task{}, err
+	}
+
+	return failedTask, nil
 }
 
 func selectOverdueTask(
@@ -264,6 +464,7 @@ func selectOverdueTask(
 		&task.CreatedAt,
 		&task.UpdatedAt,
 	)
+
 	if errors.Is(err, pgx.ErrNoRows) {
 		return clinicaltask.Task{}, ErrNoOverdueTask
 	}
@@ -280,16 +481,28 @@ func selectOverdueTask(
 
 func escalationTarget(
 	level int,
-) (string, time.Duration) {
+) (string, time.Duration, error) {
 	switch level {
 	case 1:
-		return "medical-registrar", 5 * time.Minute
+		return "medical-registrar",
+			5 * time.Minute,
+			nil
 
 	case 2:
-		return "consultant-on-call", 10 * time.Minute
+		return "consultant-on-call",
+			10 * time.Minute,
+			nil
+
+	case 3:
+		return "site-operations-team",
+			15 * time.Minute,
+			nil
 
 	default:
-		return "site-operations-team", 15 * time.Minute
+		return "", 0, fmt.Errorf(
+			"unsupported escalation level %d",
+			level,
+		)
 	}
 }
 

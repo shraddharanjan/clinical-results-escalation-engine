@@ -15,12 +15,12 @@ import (
 )
 
 type TaskAcknowledger interface {
-	Acknowledge(
+	AcknowledgeWithLatency(
 		ctx context.Context,
 		taskID uuid.UUID,
 		clinicianID string,
 		expectedVersion int64,
-	) (clinicaltask.Task, error)
+	) (clinicaltask.AcknowledgementResult, error)
 }
 
 type AcknowledgementHandler struct {
@@ -44,7 +44,8 @@ type acknowledgementRequest struct {
 }
 
 type acknowledgementResponse struct {
-	Task clinicaltask.Task `json:"task"`
+	Task              clinicaltask.Task `json:"task"`
+	AcknowledgementMS int64             `json:"acknowledgement_latency_ms"`
 }
 
 func (h *AcknowledgementHandler) Create(
@@ -103,7 +104,7 @@ func (h *AcknowledgementHandler) Create(
 		return
 	}
 
-	task, err := h.acknowledger.Acknowledge(
+	result, err := h.acknowledger.AcknowledgeWithLatency(
 		r.Context(),
 		taskID,
 		request.ClinicianID,
@@ -150,15 +151,16 @@ func (h *AcknowledgementHandler) Create(
 
 	h.metrics.RecordAcknowledgement(
 		r.Context(),
-		task.Severity,
-		0,
+		result.Task.Severity,
+		result.Latency,
 	)
 
 	writeJSON(
 		w,
 		http.StatusOK,
 		acknowledgementResponse{
-			Task: task,
+			Task:              result.Task,
+			AcknowledgementMS: result.Latency.Milliseconds(),
 		},
 	)
 }
