@@ -3,3 +3,6 @@ bin/
 coverage.out
 *.exe
 .vscode/
+ui/node_modules/
+ui/dist/
+ui/.env
