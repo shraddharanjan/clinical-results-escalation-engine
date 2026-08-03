@@ -377,51 +377,6 @@ Local synthetic ingestion benchmark:
 
 The benchmark covers validation, classification and transactional creation of the result, task and initial audit events on a local Windows and Docker Desktop environment.
 
-## Design decisions
-
-### Why PostgreSQL rather than Redis?
-
-Tasks are durable workflow state. PostgreSQL allows result creation, task creation and audit insertion to commit atomically while also providing row locking, delayed availability and lease storage.
-
-### Why PostgreSQL rather than Kafka?
-
-The core operation requires immediate consistency between the result, task and audit events. Kafka would create a database-and-broker dual-write problem. A future Kafka integration would use a transactional outbox for downstream events.
-
-### Why a modular monolith?
-
-The API, worker and scheduler are independently executable processes but share domain packages and one database. This preserves simple transactions and deployment while allowing horizontal worker scaling.
-
-### Why at-least-once rather than exactly-once?
-
-Exactly-once side effects cannot be guaranteed across independent systems without provider cooperation. The design uses at-least-once attempts, deterministic idempotency keys and provider-side deduplication.
-
-## Deployment
-
-### Hosted demo
-
-- UI: Vercel
-- API: Render
-- Database: Neon
-- Local observability: OpenTelemetry Collector, Jaeger, Prometheus and Grafana
-
-Frontend production variables:
-
-```env
-VITE_API_URL=https://clinical-results-api.onrender.com
-VITE_USE_MOCKS=false
-```
-
-Backend production variables:
-
-```env
-DATABASE_URL=<Neon pooled connection string>
-APP_ENVIRONMENT=production
-APP_VERSION=0.3.0
-FRONTEND_URL=https://YOUR-VERCEL-PROJECT.vercel.app
-OTEL_ENABLED=false
-```
-
-Never expose `DATABASE_URL` through a `VITE_*` variable.
 
 ## Limitations
 
